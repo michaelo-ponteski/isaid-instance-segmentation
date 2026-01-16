@@ -6,8 +6,7 @@ import numpy as np
 from PIL import Image, ImageDraw
 import copy
 
-
-def overfit_single_image_test(model, dataset, idx=0, num_epochs=100, device="cuda"):
+def overfit_single_image_test(model, dataset, idx=0, num_epochs=100, device='cuda'):
     """
     Test if model can overfit to a single image.
     This is a sanity check to ensure the model can learn.
@@ -28,11 +27,9 @@ def overfit_single_image_test(model, dataset, idx=0, num_epochs=100, device="cud
 
     # Convert to tensor if needed
     if not isinstance(image, torch.Tensor):
-        transform = transforms.Compose(
-            [
-                transforms.ToTensor(),
-            ]
-        )
+        transform = transforms.Compose([
+            transforms.ToTensor(),
+        ])
         image = transform(image)
 
     print(f"\nImage shape: {image.shape}")
@@ -42,7 +39,8 @@ def overfit_single_image_test(model, dataset, idx=0, num_epochs=100, device="cud
     # Move to device
     model = model.to(device)
     image = image.to(device)
-    target = {k: v.to(device) for k, v in target.items()}
+    target = {k: v.to(device) if isinstance(v, torch.Tensor) else v
+              for k, v in target.items()}
 
     # Create optimizer with higher learning rate for overfitting
     params = [p for p in model.parameters() if p.requires_grad]
@@ -74,9 +72,9 @@ def overfit_single_image_test(model, dataset, idx=0, num_epochs=100, device="cud
     # Plot loss curve
     plt.figure(figsize=(10, 5))
     plt.plot(losses_history)
-    plt.xlabel("Epoch")
-    plt.ylabel("Loss")
-    plt.title("Overfitting Test - Loss Curve")
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    plt.title('Overfitting Test - Loss Curve')
     plt.grid(True)
     plt.show()
 
@@ -127,40 +125,34 @@ def visualize_predictions(image, target, prediction, dataset, conf_threshold=0.5
     ax = axes[0]
     ax.imshow(image_np)
 
-    if "boxes" in target and len(target["boxes"]) > 0:
-        boxes = target["boxes"].cpu().numpy()
-        labels = target["labels"].cpu().numpy()
+    if 'boxes' in target and len(target['boxes']) > 0:
+        boxes = target['boxes'].cpu().numpy()
+        labels = target['labels'].cpu().numpy()
 
         for box, label in zip(boxes, labels):
             x1, y1, x2, y2 = box
-            rect = plt.Rectangle(
-                (x1, y1), x2 - x1, y2 - y1, fill=False, edgecolor="lime", linewidth=2
-            )
+            rect = plt.Rectangle((x1, y1), x2-x1, y2-y1,
+                                fill=False, edgecolor='lime', linewidth=2)
             ax.add_patch(rect)
 
             # Get category name if available
             cat_names = dataset.get_category_names()
-            cat_name = cat_names.get(int(label), f"Class {label}")
+            cat_name = cat_names.get(int(label), f'Class {label}')
 
-            ax.text(
-                x1,
-                y1 - 5,
-                cat_name,
-                color="white",
-                fontsize=10,
-                bbox=dict(facecolor="lime", alpha=0.7),
-            )
+            ax.text(x1, y1-5, cat_name,
+                   color='white', fontsize=10,
+                   bbox=dict(facecolor='lime', alpha=0.7))
 
-    ax.set_title("Ground Truth", fontsize=14, fontweight="bold")
-    ax.axis("off")
+    ax.set_title('Ground Truth', fontsize=14, fontweight='bold')
+    ax.axis('off')
 
     # Predictions
     ax = axes[1]
     ax.imshow(image_np)
 
-    boxes = prediction["boxes"].cpu().numpy()
-    labels = prediction["labels"].cpu().numpy()
-    scores = prediction["scores"].cpu().numpy()
+    boxes = prediction['boxes'].cpu().numpy()
+    labels = prediction['labels'].cpu().numpy()
+    scores = prediction['scores'].cpu().numpy()
 
     # Filter by confidence threshold
     keep = scores > conf_threshold
@@ -170,27 +162,19 @@ def visualize_predictions(image, target, prediction, dataset, conf_threshold=0.5
 
     for box, label, score in zip(boxes, labels, scores):
         x1, y1, x2, y2 = box
-        rect = plt.Rectangle(
-            (x1, y1), x2 - x1, y2 - y1, fill=False, edgecolor="red", linewidth=2
-        )
+        rect = plt.Rectangle((x1, y1), x2-x1, y2-y1,
+                            fill=False, edgecolor='red', linewidth=2)
         ax.add_patch(rect)
 
         cat_names = dataset.get_category_names()
-        cat_name = cat_names.get(int(label), f"Class {label}")
+        cat_name = cat_names.get(int(label), f'Class {label}')
 
-        ax.text(
-            x1,
-            y1 - 5,
-            f"{cat_name} {score:.2f}",
-            color="white",
-            fontsize=10,
-            bbox=dict(facecolor="red", alpha=0.7),
-        )
+        ax.text(x1, y1-5, f'{cat_name} {score:.2f}',
+               color='white', fontsize=10,
+               bbox=dict(facecolor='red', alpha=0.7))
 
-    ax.set_title(
-        f"Predictions (conf > {conf_threshold})", fontsize=14, fontweight="bold"
-    )
-    ax.axis("off")
+    ax.set_title(f'Predictions (conf > {conf_threshold})', fontsize=14, fontweight='bold')
+    ax.axis('off')
 
     plt.tight_layout()
     plt.show()
@@ -199,7 +183,7 @@ def visualize_predictions(image, target, prediction, dataset, conf_threshold=0.5
 
 
 # Complete example workflow
-if __name__ == "__main__":
+if __name__ == '__main__':
     print("Setting up overfit test...")
 
     # Import previous components
@@ -207,13 +191,13 @@ if __name__ == "__main__":
     from models.maskrcnn_model import get_maskrcnn_model
 
     # Setup
-    root_dir = "iSAID_patches"
+    root_dir = 'iSAID_patches'
     num_classes = 16  # 15 classes + background
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     # Load dataset
     print("Loading dataset...")
-    train_dataset = iSAIDDataset(root_dir, split="train")
+    train_dataset = iSAIDDataset(root_dir, split='train')
 
     # Create model
     print("Creating model...")
@@ -222,10 +206,12 @@ if __name__ == "__main__":
     # Run overfit test
     print("\nStarting overfit test...")
     losses, predictions = overfit_single_image_test(
-        model, train_dataset, idx=0, num_epochs=50, device=device  # Use first image
+        model,
+        train_dataset,
+        idx=0,  # Use first image
+        num_epochs=50,
+        device=device
     )
 
     print("\nOverfit test complete!")
-    print(
-        "If the model successfully overfitted, you're ready to train on the full dataset."
-    )
+    print("If the model successfully overfitted, you're ready to train on the full dataset.")
