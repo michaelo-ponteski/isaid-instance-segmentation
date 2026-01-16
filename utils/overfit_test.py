@@ -42,9 +42,9 @@ def overfit_single_image_test(model, dataset, idx=0, num_epochs=100, device='cud
     target = {k: v.to(device) if isinstance(v, torch.Tensor) else v
               for k, v in target.items()}
 
-    # Create optimizer with higher learning rate for overfitting
+    # Create optimizer - lower LR to prevent gradient explosion
     params = [p for p in model.parameters() if p.requires_grad]
-    optimizer = torch.optim.SGD(params, lr=0.01, momentum=0.9, weight_decay=0)
+    optimizer = torch.optim.SGD(params, lr=0.001, momentum=0.9, weight_decay=0.0001)
 
     # Training loop
     model.train()
@@ -56,9 +56,10 @@ def overfit_single_image_test(model, dataset, idx=0, num_epochs=100, device='cud
         loss_dict = model([image], [target])
         losses = sum(loss for loss in loss_dict.values())
 
-        # Backward pass
+        # Backward pass with gradient clipping
         optimizer.zero_grad()
         losses.backward()
+        torch.nn.utils.clip_grad_norm_(params, max_norm=1.0)
         optimizer.step()
 
         losses_history.append(losses.item())
@@ -168,7 +169,6 @@ def visualize_predictions(image, target, prediction, dataset, conf_threshold=0.5
 
         cat_names = dataset.get_category_names()
         cat_name = cat_names.get(int(label), f'Class {label}')
-
         ax.text(x1, y1-5, cat_name,
                color='white', fontsize=10,
                bbox=dict(facecolor='red', alpha=0.7))
@@ -180,3 +180,38 @@ def visualize_predictions(image, target, prediction, dataset, conf_threshold=0.5
     plt.show()
 
     print(f"\nPredictions: {len(boxes)} objects detected")
+
+
+# Complete example workflow
+if __name__ == '__main__':
+    print("Setting up overfit test...")
+
+    # Import previous components
+    from isaid_dataset import iSAIDDataset
+    from maskrcnn_model import get_maskrcnn_model
+
+    # Setup
+    root_dir = 'iSAID_patches'
+    num_classes = 16  # 15 classes + background
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+    # Load dataset
+    print("Loading dataset...")
+    train_dataset = iSAIDDataset(root_dir, split='train')
+
+    # Create model
+    print("Creating model...")
+    model = get_maskrcnn_model(num_classes, pretrained=True)
+
+    # Run overfit test
+    print("\nStarting overfit test...")
+    losses, predictions = overfit_single_image_test(
+        model,
+        train_dataset,
+        idx=0,  # Use first image
+        num_epochs=50,
+        device=device
+    )
+
+    print("\nOverfit test complete!")
+    print("If the model successfully overfitted, you're ready to train on the full dataset.")
