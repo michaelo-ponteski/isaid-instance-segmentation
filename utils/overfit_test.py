@@ -135,11 +135,11 @@ def visualize_predictions(image, target, prediction, dataset, conf_threshold=0.5
                                 fill=False, edgecolor='lime', linewidth=2)
             ax.add_patch(rect)
 
-            # Get category name if available
-            cat_names = dataset.get_category_names()
-            cat_name = cat_names.get(int(label), f'Class {label}')
+        # Get category name
+        cat_names = dataset.get_category_names()
+        cat_name = cat_names.get(int(label), f'Class {label}')
 
-            ax.text(x1, y1-5, cat_name,
+        ax.text(x1, y1-5, f'{cat_name} {score:.2f}',
                    color='white', fontsize=10,
                    bbox=dict(facecolor='lime', alpha=0.7))
 
@@ -169,7 +169,7 @@ def visualize_predictions(image, target, prediction, dataset, conf_threshold=0.5
         cat_names = dataset.get_category_names()
         cat_name = cat_names.get(int(label), f'Class {label}')
 
-        ax.text(x1, y1-5, f'{cat_name} {score:.2f}',
+        ax.text(x1, y1-5, cat_name,
                color='white', fontsize=10,
                bbox=dict(facecolor='red', alpha=0.7))
 
@@ -180,38 +180,3 @@ def visualize_predictions(image, target, prediction, dataset, conf_threshold=0.5
     plt.show()
 
     print(f"\nPredictions: {len(boxes)} objects detected")
-
-
-# Complete example workflow
-if __name__ == '__main__':
-    print("Setting up overfit test...")
-
-    # Import previous components
-    from datasets.isaid_dataset import iSAIDDataset
-    from models.maskrcnn_model import get_maskrcnn_model
-
-    # Setup
-    root_dir = 'iSAID_patches'
-    num_classes = 16  # 15 classes + background
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
-    # Load dataset
-    print("Loading dataset...")
-    train_dataset = iSAIDDataset(root_dir, split='train')
-
-    # Create model
-    print("Creating model...")
-    model = get_maskrcnn_model(num_classes, pretrained=True)
-
-    # Run overfit test
-    print("\nStarting overfit test...")
-    losses, predictions = overfit_single_image_test(
-        model,
-        train_dataset,
-        idx=0,  # Use first image
-        num_epochs=50,
-        device=device
-    )
-
-    print("\nOverfit test complete!")
-    print("If the model successfully overfitted, you're ready to train on the full dataset.")

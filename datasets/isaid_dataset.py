@@ -35,7 +35,7 @@ class iSAIDDataset(Dataset):
 
         if split != "test":
             ann_file = os.path.join(
-                root_dir, split, f"instances_only_filtered_{split}.json"
+                root_dir, split, f"instance_only_filtered_{split}.json"
             )
             with open(ann_file, "r") as f:
                 self.annotations = json.load(f)
@@ -89,11 +89,14 @@ class iSAIDDataset(Dataset):
                 labels.append(ann["category_id"])
                 areas.append(ann["area"])
 
-                # Segmentation mask
-                if "segmentation" in ann:
-                    # RLE or polygon format - convert to mask
-                    # For simplicity, we'll create a placeholder
-                    # You might need pycocotools for proper mask decoding
+                # Segmentation mask - convert polygon to binary mask
+                if "segmentation" in ann and len(ann["segmentation"]) > 0:
+                    mask = self._polygon_to_mask(
+                        ann["segmentation"], img_info["height"], img_info["width"]
+                    )
+                    masks.append(mask)
+                else:
+                    # Empty mask fallback
                     mask = np.zeros(
                         (img_info["height"], img_info["width"]), dtype=np.uint8
                     )
@@ -117,6 +120,19 @@ class iSAIDDataset(Dataset):
             image = self.transforms(image)
 
         return image, target
+
+    def _polygon_to_mask(self, segmentation, height, width):
+        """Convert polygon segmentation to binary mask"""
+        import cv2
+
+        mask = np.zeros((height, width), dtype=np.uint8)
+
+        for polygon in segmentation:
+            # Polygon is [x1, y1, x2, y2, ...] - reshape to [[x1, y1], [x2, y2], ...]
+            poly_array = np.array(polygon).reshape(-1, 2).astype(np.int32)
+            cv2.fillPoly(mask, [poly_array], 1)
+
+        return mask
 
     def get_category_names(self):
         """Returns mapping of category IDs to names"""
@@ -152,10 +168,14 @@ def visualize_sample(dataset, idx):
                 (x1, y1), x2 - x1, y2 - y1, fill=False, edgecolor="red", linewidth=2
             )
             ax.add_patch(rect)
+            # Get category name if available
+            cat_names = dataset.get_category_names()
+            cat_name = cat_names.get(int(label), f"Class {label}")
+
             plt.text(
                 x1,
                 y1 - 5,
-                f"Class {label}",
+                cat_name,
                 color="white",
                 fontsize=10,
                 bbox=dict(facecolor="red", alpha=0.7),
