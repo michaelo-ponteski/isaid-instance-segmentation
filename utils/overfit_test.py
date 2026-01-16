@@ -42,9 +42,9 @@ def overfit_single_image_test(model, dataset, idx=0, num_epochs=100, device='cud
     target = {k: v.to(device) if isinstance(v, torch.Tensor) else v
               for k, v in target.items()}
 
-    # Create optimizer - Adam for faster convergence in overfitting
+    # Create optimizer - higher LR for aggressive overfitting
     params = [p for p in model.parameters() if p.requires_grad]
-    optimizer = torch.optim.Adam(params, lr=0.0001)
+    optimizer = torch.optim.Adam(params, lr=0.001)
 
     # Training loop
     model.train()
@@ -98,9 +98,9 @@ def overfit_single_image_test(model, dataset, idx=0, num_epochs=100, device='cud
     print(f"Final Loss: {final_loss:.4f}")
     print(f"Improvement: {improvement:.2f}%")
 
-    if final_loss < 0.5:
+    if final_loss < 0.3:
         print("✓ SUCCESS: Model successfully overfitted to the image!")
-    elif improvement > 50:
+    elif improvement > 80:
         print("⚠ PARTIAL: Model is learning but may need more epochs")
     else:
         print("✗ FAILURE: Model is not learning properly - check configuration")
@@ -169,7 +169,6 @@ def visualize_predictions(image, target, prediction, dataset, conf_threshold=0.5
 
         cat_names = dataset.get_category_names()
         cat_name = cat_names.get(int(label), f'Class {label}')
-
         ax.text(x1, y1-5, cat_name,
                color='white', fontsize=10,
                bbox=dict(facecolor='red', alpha=0.7))
