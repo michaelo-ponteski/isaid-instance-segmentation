@@ -88,7 +88,7 @@ def overfit_single_image_test(model, dataset, idx=0, num_epochs=100, device="cud
         predictions = model([image])
 
     # Visualize results
-    num_gt = len(target['boxes'])
+    num_gt = len(target["boxes"])
     visualize_predictions(image, target, predictions[0], dataset, num_gt=num_gt)
 
     # Check if model learned
@@ -106,14 +106,32 @@ def overfit_single_image_test(model, dataset, idx=0, num_epochs=100, device="cud
     return losses_history, predictions
 
 
-def visualize_predictions(image, target, prediction, dataset, conf_threshold=0.5, num_gt=None):
+def visualize_predictions(
+    image, target, prediction, dataset, conf_threshold=0.5, num_gt=None
+):
     """
     Simple visualization of ground truth vs predictions.
     """
     # Colors for different classes
-    COLORS = ['red', 'blue', 'green', 'orange', 'purple', 'cyan', 'magenta', 
-              'yellow', 'lime', 'pink', 'brown', 'navy', 'teal', 'olive', 'coral', 'gold']
-    
+    COLORS = [
+        "red",
+        "blue",
+        "green",
+        "orange",
+        "purple",
+        "cyan",
+        "magenta",
+        "yellow",
+        "lime",
+        "pink",
+        "brown",
+        "navy",
+        "teal",
+        "olive",
+        "coral",
+        "gold",
+    ]
+
     # Convert image to numpy
     if isinstance(image, torch.Tensor):
         image_np = image.cpu().permute(1, 2, 0).numpy()
@@ -170,9 +188,19 @@ def visualize_predictions(image, target, prediction, dataset, conf_threshold=0.5
 
     # Legend for classes that appear
     used_labels = set(target["labels"].cpu().numpy().tolist())
-    legend_elements = [plt.Line2D([0], [0], color=COLORS[int(l) % len(COLORS)], linewidth=2, 
-                                   label=cat_names.get(int(l), f"Class {l}")) for l in used_labels]
-    fig.legend(handles=legend_elements, loc='lower center', ncol=min(len(used_labels), 5))
+    legend_elements = [
+        plt.Line2D(
+            [0],
+            [0],
+            color=COLORS[int(l) % len(COLORS)],
+            linewidth=2,
+            label=cat_names.get(int(l), f"Class {l}"),
+        )
+        for l in used_labels
+    ]
+    fig.legend(
+        handles=legend_elements, loc="lower center", ncol=min(len(used_labels), 5)
+    )
     ax.axis("off")
 
     plt.tight_layout()
