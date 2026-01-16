@@ -42,9 +42,9 @@ def overfit_single_image_test(model, dataset, idx=0, num_epochs=100, device='cud
     target = {k: v.to(device) if isinstance(v, torch.Tensor) else v
               for k, v in target.items()}
 
-    # Create optimizer - lower LR to prevent gradient explosion
+    # Create optimizer - Adam for faster convergence in overfitting
     params = [p for p in model.parameters() if p.requires_grad]
-    optimizer = torch.optim.SGD(params, lr=0.001, momentum=0.9, weight_decay=0.0001)
+    optimizer = torch.optim.Adam(params, lr=0.0001)
 
     # Training loop
     model.train()
@@ -169,6 +169,7 @@ def visualize_predictions(image, target, prediction, dataset, conf_threshold=0.5
 
         cat_names = dataset.get_category_names()
         cat_name = cat_names.get(int(label), f'Class {label}')
+
         ax.text(x1, y1-5, cat_name,
                color='white', fontsize=10,
                bbox=dict(facecolor='red', alpha=0.7))
