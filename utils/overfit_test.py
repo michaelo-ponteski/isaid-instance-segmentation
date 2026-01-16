@@ -88,34 +88,32 @@ def overfit_single_image_test(model, dataset, idx=0, num_epochs=100, device="cud
         predictions = model([image])
 
     # Visualize results
-    visualize_predictions(image, target, predictions[0], dataset)
+    num_gt = len(target['boxes'])
+    visualize_predictions(image, target, predictions[0], dataset, num_gt=num_gt)
 
     # Check if model learned
     final_loss = losses_history[-1]
     initial_loss = losses_history[0]
     improvement = (initial_loss - final_loss) / initial_loss * 100
 
-    print("\n" + "=" * 80)
+    print("\n" + "=" * 50)
     print("RESULTS:")
     print(f"Initial Loss: {initial_loss:.4f}")
     print(f"Final Loss: {final_loss:.4f}")
-    print(f"Improvement: {improvement:.2f}%")
-
-    if final_loss < 0.3:
-        print("✓ SUCCESS: Model successfully overfitted to the image!")
-    elif improvement > 80:
-        print("⚠ PARTIAL: Model is learning but may need more epochs")
-    else:
-        print("✗ FAILURE: Model is not learning properly - check configuration")
-    print("=" * 80)
+    print(f"Improvement: {improvement:.1f}%")
+    print("=" * 50)
 
     return losses_history, predictions
 
 
-def visualize_predictions(image, target, prediction, dataset, conf_threshold=0.5):
+def visualize_predictions(image, target, prediction, dataset, conf_threshold=0.5, num_gt=None):
     """
-    Visualize ground truth and predictions side by side.
+    Simple visualization of ground truth vs predictions.
     """
+    # Colors for different classes
+    COLORS = ['red', 'blue', 'green', 'orange', 'purple', 'cyan', 'magenta', 
+              'yellow', 'lime', 'pink', 'brown', 'navy', 'teal', 'olive', 'coral', 'gold']
+    
     # Convert image to numpy
     if isinstance(image, torch.Tensor):
         image_np = image.cpu().permute(1, 2, 0).numpy()
@@ -123,7 +121,8 @@ def visualize_predictions(image, target, prediction, dataset, conf_threshold=0.5
     else:
         image_np = np.array(image)
 
-    fig, axes = plt.subplots(1, 2, figsize=(16, 8))
+    cat_names = dataset.get_category_names()
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
 
     # Ground truth
     ax = axes[0]
@@ -132,27 +131,15 @@ def visualize_predictions(image, target, prediction, dataset, conf_threshold=0.5
     if "boxes" in target and len(target["boxes"]) > 0:
         boxes = target["boxes"].cpu().numpy()
         labels = target["labels"].cpu().numpy()
-        cat_names = dataset.get_category_names()
-
         for box, label in zip(boxes, labels):
             x1, y1, x2, y2 = box
+            color = COLORS[int(label) % len(COLORS)]
             rect = plt.Rectangle(
-                (x1, y1), x2 - x1, y2 - y1, fill=False, edgecolor="lime", linewidth=2
+                (x1, y1), x2 - x1, y2 - y1, fill=False, edgecolor=color, linewidth=2
             )
             ax.add_patch(rect)
 
-            # Get category name and add label (no score for ground truth)
-            cat_name = cat_names.get(int(label), f"Class {label}")
-            ax.text(
-                x1,
-                y1 - 5,
-                cat_name,
-                color="white",
-                fontsize=10,
-                bbox=dict(facecolor="lime", alpha=0.7),
-            )
-
-    ax.set_title("Ground Truth", fontsize=14, fontweight="bold")
+    ax.set_title(f"Ground Truth ({len(target['boxes'])} boxes)")
     ax.axis("off")
 
     # Predictions
@@ -163,7 +150,7 @@ def visualize_predictions(image, target, prediction, dataset, conf_threshold=0.5
     labels = prediction["labels"].cpu().numpy()
     scores = prediction["scores"].cpu().numpy()
 
-    # Filter by confidence threshold
+    # Filter by confidence
     keep = scores > conf_threshold
     boxes = boxes[keep]
     labels = labels[keep]
@@ -171,31 +158,29 @@ def visualize_predictions(image, target, prediction, dataset, conf_threshold=0.5
 
     for box, label, score in zip(boxes, labels, scores):
         x1, y1, x2, y2 = box
+        color = COLORS[int(label) % len(COLORS)]
         rect = plt.Rectangle(
-            (x1, y1), x2 - x1, y2 - y1, fill=False, edgecolor="red", linewidth=2
+            (x1, y1), x2 - x1, y2 - y1, fill=False, edgecolor=color, linewidth=2
         )
         ax.add_patch(rect)
+        ax.text(x1, y1 - 3, f"{score:.2f}", color=color, fontsize=8)
 
-        cat_names = dataset.get_category_names()
-        cat_name = cat_names.get(int(label), f"Class {label}")
-        ax.text(
-            x1,
-            y1 - 5,
-            f"{cat_name} {score:.2f}",
-            color="white",
-            fontsize=10,
-            bbox=dict(facecolor="red", alpha=0.7),
-        )
+    ax.set_title(f"Predictions ({len(boxes)} boxes, conf>{conf_threshold})")
+    ax.axis("off")
 
-    ax.set_title(
-        f"Predictions (conf > {conf_threshold})", fontsize=14, fontweight="bold"
-    )
+    # Legend for classes that appear
+    used_labels = set(target["labels"].cpu().numpy().tolist())
+    legend_elements = [plt.Line2D([0], [0], color=COLORS[int(l) % len(COLORS)], linewidth=2, 
+                                   label=cat_names.get(int(l), f"Class {l}")) for l in used_labels]
+    fig.legend(handles=legend_elements, loc='lower center', ncol=min(len(used_labels), 5))
     ax.axis("off")
 
     plt.tight_layout()
     plt.show()
 
-    print(f"\nPredictions: {len(boxes)} objects detected")
+    # Print comparison
+    if num_gt is not None:
+        print(f"\nFound {len(boxes)} boxes (should be {num_gt})")
 
 
 # Complete example workflow
