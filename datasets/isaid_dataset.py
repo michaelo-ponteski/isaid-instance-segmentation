@@ -37,7 +37,7 @@ class iSAIDDataset(Dataset):
 
         if split != "test":
             ann_file = os.path.join(
-                root_dir, split, f"instance_only_filtered_{split}.json"
+                root_dir, split, f"instances_only_filtered_{split}.json"
             )
             with open(ann_file, "r") as f:
                 self.annotations = json.load(f)
