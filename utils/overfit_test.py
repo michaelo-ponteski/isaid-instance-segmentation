@@ -40,15 +40,16 @@ def overfit_single_image_test(model, dataset, idx=0, num_epochs=100, device="cud
     print(f"Classes: {target['labels'].tolist()}")
 
     # Move to device
+    device = torch.device(device if torch.cuda.is_available() else "cpu")
     model = model.to(device)
     image = image.to(device)
     target = {
         k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in target.items()
     }
 
-    # Create optimizer - SGD with momentum works better for detection models
+    # Create optimizer with lower learning rate for stability
     params = [p for p in model.parameters() if p.requires_grad]
-    optimizer = torch.optim.SGD(params, lr=0.005, momentum=0.9, weight_decay=0.0005)
+    optimizer = torch.optim.SGD(params, lr=0.001, momentum=0.9, weight_decay=0.0005)
 
     # Training loop
     model.train()
@@ -60,9 +61,18 @@ def overfit_single_image_test(model, dataset, idx=0, num_epochs=100, device="cud
         loss_dict = model([image], [target])
         losses = sum(loss for loss in loss_dict.values())
 
+        # Check for NaN or inf
+        if torch.isnan(losses) or torch.isinf(losses):
+            print(f"Warning: NaN or Inf loss at epoch {epoch+1}. Stopping training.")
+            break
+
         # Backward pass
         optimizer.zero_grad()
         losses.backward()
+        
+        # Gradient clipping to prevent explosion
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        
         optimizer.step()
 
         losses_history.append(losses.item())

@@ -109,9 +109,17 @@ class MaskRCNNTrainer:
             loss_dict = self.model(images, targets)
             losses = sum(loss for loss in loss_dict.values())
 
+            # Skip if loss is NaN
+            if torch.isnan(losses) or torch.isinf(losses):
+                continue
+
             # Backward pass
             self.optimizer.zero_grad()
             losses.backward()
+            
+            # Gradient clipping to prevent explosion
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+            
             self.optimizer.step()
 
             total_loss += losses.item()
