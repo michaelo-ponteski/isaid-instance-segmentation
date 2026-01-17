@@ -14,16 +14,18 @@ class iSAIDDataset(Dataset):
     Supports train/val/test splits with COCO-format annotations.
     """
 
-    def __init__(self, root_dir, split="train", transforms=None):
+    def __init__(self, root_dir, split="train", transforms=None, filter_empty=True):
         """
         Args:
             root_dir: Path to iSAID_patches directory
             split: 'train', 'val', or 'test'
             transforms: Optional transforms to apply
+            filter_empty: If True, filter out images without annotations
         """
         self.root_dir = root_dir
         self.split = split
         self.transforms = transforms
+        self.filter_empty = filter_empty
 
         # Setup paths
         self.img_dir = os.path.join(root_dir, split, "images")
@@ -35,7 +37,7 @@ class iSAIDDataset(Dataset):
 
         if split != "test":
             ann_file = os.path.join(
-                root_dir, split, f"instances_only_filtered_{split}.json"
+                root_dir, split, f"instance_only_filtered_{split}.json"
             )
             with open(ann_file, "r") as f:
                 self.annotations = json.load(f)
@@ -47,6 +49,18 @@ class iSAIDDataset(Dataset):
                 if img_id not in self.anns_per_image:
                     self.anns_per_image[img_id] = []
                 self.anns_per_image[img_id].append(ann)
+
+            # Filter out images without annotations if requested
+            if self.filter_empty:
+                self.images_info = [
+                    img
+                    for img in self.images_info
+                    if img["id"] in self.anns_per_image
+                    and len(self.anns_per_image[img["id"]]) > 0
+                ]
+                print(
+                    f"Filtered dataset: {len(self.images_info)} images with annotations"
+                )
         else:
             # For test set, just list all images
             img_files = [
@@ -185,3 +199,41 @@ def visualize_sample(dataset, idx):
     plt.title(f"Sample {idx}")
     plt.tight_layout()
     plt.show()
+
+
+# Initialize datasets
+if __name__ == "__main__":
+    root_dir = "iSAID_patches"
+
+    # Create datasets
+    train_dataset = iSAIDDataset(root_dir, split="train")
+    val_dataset = iSAIDDataset(root_dir, split="val")
+    test_dataset = iSAIDDataset(root_dir, split="test")
+
+    print(f"Train samples: {len(train_dataset)}")
+    print(f"Val samples: {len(val_dataset)}")
+    print(f"Test samples: {len(test_dataset)}")
+
+    # Get category names
+    categories = train_dataset.get_category_names()
+    print(f"\nCategories: {categories}")
+
+    # Visualize a sample
+    visualize_sample(train_dataset, 0)
+
+    # Create dataloaders
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=2,
+        shuffle=True,
+        num_workers=2,
+        collate_fn=lambda x: tuple(zip(*x)),
+    )
+
+    # Test iteration
+    images, targets = next(iter(train_loader))
+    print(f"\nBatch size: {len(images)}")
+    print(
+        f"Image shape: {images[0].shape if isinstance(images[0], torch.Tensor) else 'PIL Image'}"
+    )
+    print(f"Target keys: {targets[0].keys()}")
