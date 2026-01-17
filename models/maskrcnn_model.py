@@ -89,10 +89,12 @@ class MaskRCNNTrainer:
 
     def train_one_epoch(self, data_loader):
         """Train for one epoch"""
+        from tqdm import tqdm
+        
         self.model.train()
         total_loss = 0
 
-        for images, targets in data_loader:
+        for images, targets in tqdm(data_loader, desc="Training", leave=False):
             # Move to device
             images = [img.to(self.device) for img in images]
             targets = [{k: v.to(self.device) for k, v in t.items()} for t in targets]
@@ -113,10 +115,12 @@ class MaskRCNNTrainer:
     @torch.no_grad()
     def validate(self, data_loader):
         """Validate the model"""
+        from tqdm import tqdm
+        
         self.model.eval()
         total_loss = 0
 
-        for images, targets in data_loader:
+        for images, targets in tqdm(data_loader, desc="Validation", leave=False):
             images = [img.to(self.device) for img in images]
             targets = [{k: v.to(self.device) for k, v in t.items()} for t in targets]
 
@@ -162,9 +166,16 @@ def train_model(
         history: Dictionary with training history
     """
     from torch.utils.data import DataLoader
+    from torchvision import transforms as T
 
     def collate_fn(batch):
         return tuple(zip(*batch))
+    
+    # Apply transforms if not already applied
+    if train_dataset.transforms is None:
+        train_dataset.transforms = T.ToTensor()
+    if val_dataset.transforms is None:
+        val_dataset.transforms = T.ToTensor()
 
     # Create data loaders
     train_loader = DataLoader(
@@ -204,9 +215,8 @@ def train_model(
     print(f"Train samples: {len(train_dataset)}, Val samples: {len(val_dataset)}")
 
     # Training loop
-    for epoch in range(num_epochs):
-        print(f"\nEpoch [{epoch+1}/{num_epochs}]")
-
+    from tqdm import tqdm
+    for epoch in tqdm(range(num_epochs), desc="Epochs"):
         # Train
         train_loss = trainer.train_one_epoch(train_loader)
         history["train_loss"].append(train_loss)
@@ -218,6 +228,6 @@ def train_model(
         # Update learning rate
         lr_scheduler.step()
 
-        print(f"Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}")
+        tqdm.write(f"Epoch {epoch+1}/{num_epochs} - Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}")
 
     return trainer, history
