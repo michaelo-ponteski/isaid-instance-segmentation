@@ -89,7 +89,7 @@ class MaskRCNNTrainer:
 
     def train_one_epoch(self, data_loader):
         """Train for one epoch"""
-        from tqdm import tqdm
+        from tqdm.auto import tqdm
 
         self.model.train()
         total_loss = 0
@@ -121,7 +121,7 @@ class MaskRCNNTrainer:
     @torch.no_grad()
     def validate(self, data_loader):
         """Validate the model"""
-        from tqdm import tqdm
+        from tqdm.auto import tqdm
 
         self.model.eval()
         total_loss = 0
@@ -227,7 +227,7 @@ def train_model(
     print(f"Train samples: {len(train_dataset)}, Val samples: {len(val_dataset)}")
 
     # Training loop
-    from tqdm import tqdm
+    from tqdm.auto import tqdm
 
     for epoch in tqdm(range(num_epochs), desc="Epochs"):
         # Train
