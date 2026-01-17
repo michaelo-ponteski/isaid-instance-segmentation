@@ -194,7 +194,7 @@ def train_model(
         train_dataset,
         batch_size=batch_size,
         shuffle=True,
-        num_workers=4,
+        num_workers=8,
         collate_fn=collate_fn,
     )
 
@@ -202,7 +202,7 @@ def train_model(
         val_dataset,
         batch_size=batch_size,
         shuffle=False,
-        num_workers=4,
+        num_workers=8,
         collate_fn=collate_fn,
     )
 
