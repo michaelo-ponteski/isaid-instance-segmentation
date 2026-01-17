@@ -97,7 +97,7 @@ class MaskRCNNTrainer:
         for images, targets in tqdm(data_loader, desc="Training", leave=False):
             # Move to device
             images = [img.to(self.device) for img in images]
-            targets = [{k: v.to(self.device) for k, v in t.items()} for t in targets]
+            targets = [{k: v.to(self.device) if isinstance(v, torch.Tensor) else v for k, v in t.items()} for t in targets]
 
             # Forward pass
             loss_dict = self.model(images, targets)
@@ -122,7 +122,7 @@ class MaskRCNNTrainer:
 
         for images, targets in tqdm(data_loader, desc="Validation", leave=False):
             images = [img.to(self.device) for img in images]
-            targets = [{k: v.to(self.device) for k, v in t.items()} for t in targets]
+            targets = [{k: v.to(self.device) if isinstance(v, torch.Tensor) else v for k, v in t.items()} for t in targets]
 
             # Forward pass
             loss_dict = self.model(images, targets)
