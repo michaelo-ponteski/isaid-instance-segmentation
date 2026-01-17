@@ -116,10 +116,10 @@ class MaskRCNNTrainer:
             # Backward pass
             self.optimizer.zero_grad()
             losses.backward()
-            
+
             # Gradient clipping to prevent explosion
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-            
+
             self.optimizer.step()
 
             total_loss += losses.item()
