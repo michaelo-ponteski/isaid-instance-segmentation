@@ -89,21 +89,13 @@ class MaskRCNNTrainer:
 
     def train_one_epoch(self, data_loader):
         """Train for one epoch"""
-        from tqdm.auto import tqdm
-
         self.model.train()
         total_loss = 0
 
-        for images, targets in tqdm(data_loader, desc="Training", leave=False):
+        for images, targets in data_loader:
             # Move to device
             images = [img.to(self.device) for img in images]
-            targets = [
-                {
-                    k: v.to(self.device) if isinstance(v, torch.Tensor) else v
-                    for k, v in t.items()
-                }
-                for t in targets
-            ]
+            targets = [{k: v.to(self.device) for k, v in t.items()} for t in targets]
 
             # Forward pass
             loss_dict = self.model(images, targets)
@@ -121,12 +113,11 @@ class MaskRCNNTrainer:
     @torch.no_grad()
     def validate(self, data_loader):
         """Validate the model"""
-        from tqdm.auto import tqdm
-
-        self.model.eval()
+        self.model.train()  # Keep in train mode to get losses
         total_loss = 0
+        num_batches = 0
 
-        for images, targets in tqdm(data_loader, desc="Validation", leave=False):
+        for images, targets in data_loader:
             images = [img.to(self.device) for img in images]
             targets = [
                 {
@@ -136,12 +127,15 @@ class MaskRCNNTrainer:
                 for t in targets
             ]
 
-            # Forward pass
+            # Forward pass - model returns loss_dict in train mode
             loss_dict = self.model(images, targets)
             losses = sum(loss for loss in loss_dict.values())
-            total_loss += losses.item()
 
-        return total_loss / len(data_loader)
+            if not torch.isnan(losses):
+                total_loss += losses.item()
+                num_batches += 1
+
+        return total_loss / max(num_batches, 1)
 
     @torch.no_grad()
     def predict(self, images):
@@ -152,97 +146,33 @@ class MaskRCNNTrainer:
         return predictions
 
 
-def train_model(
-    train_dataset,
-    val_dataset,
-    num_classes=16,
-    num_epochs=20,
-    batch_size=2,
-    lr=0.005,
-    device="cuda",
-):
-    """
-    Simple training function for Mask R-CNN.
-
-    Args:
-        train_dataset: Training dataset
-        val_dataset: Validation dataset
-        num_classes: Number of classes (default 16 for iSAID)
-        num_epochs: Number of training epochs
-        batch_size: Batch size
-        lr: Learning rate
-        device: Device to train on
-
-    Returns:
-        trainer: Trained MaskRCNNTrainer object
-        history: Dictionary with training history
-    """
-    from torch.utils.data import DataLoader
-    from torchvision import transforms as T
-
-    def collate_fn(batch):
-        return tuple(zip(*batch))
-
-    # Apply transforms if not already applied
-    if train_dataset.transforms is None:
-        train_dataset.transforms = T.ToTensor()
-    if val_dataset.transforms is None:
-        val_dataset.transforms = T.ToTensor()
-
-    # Create data loaders
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=batch_size,
-        shuffle=True,
-        num_workers=8,
-        collate_fn=collate_fn,
-    )
-
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=8,
-        collate_fn=collate_fn,
-    )
+# Example usage
+if __name__ == "__main__":
+    # Number of classes in iSAID (15 classes + background)
+    # Ship, Storage tank, Baseball diamond, Tennis court, Basketball court,
+    # Ground track field, Bridge, Large vehicle, Small vehicle,
+    # Helicopter, Swimming pool, Roundabout, Soccer ball field,
+    # Plane, Harbor
+    num_classes = 16  # 15 object classes + 1 background
 
     # Create model
     model = get_maskrcnn_model(num_classes, pretrained=True)
+    print("Model created successfully!")
+
+    # Print model structure
+    print(f"\nModel has {sum(p.numel() for p in model.parameters())} parameters")
+    print(f"Trainable: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
 
     # Create optimizer
     params = [p for p in model.parameters() if p.requires_grad]
-    optimizer = torch.optim.SGD(params, lr=lr, momentum=0.9, weight_decay=0.0005)
+    optimizer = torch.optim.SGD(params, lr=0.005, momentum=0.9, weight_decay=0.0005)
 
-    # Learning rate scheduler
-    lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=5, gamma=0.1)
+    # Create learning rate scheduler
+    lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=3, gamma=0.1)
 
     # Initialize trainer
-    device = torch.device(device if torch.cuda.is_available() else "cpu")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     trainer = MaskRCNNTrainer(model, optimizer, device)
 
-    # Training history
-    history = {"train_loss": [], "val_loss": []}
-
-    print(f"Training on {device}")
-    print(f"Train samples: {len(train_dataset)}, Val samples: {len(val_dataset)}")
-
-    # Training loop
-    from tqdm.auto import tqdm
-
-    for epoch in tqdm(range(num_epochs), desc="Epochs"):
-        # Train
-        train_loss = trainer.train_one_epoch(train_loader)
-        history["train_loss"].append(train_loss)
-
-        # Validate
-        val_loss = trainer.validate(val_loader)
-        history["val_loss"].append(val_loss)
-
-        # Update learning rate
-        lr_scheduler.step()
-
-        tqdm.write(
-            f"Epoch {epoch+1}/{num_epochs} - Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}"
-        )
-
-    return trainer, history
+    print(f"\nUsing device: {device}")
+    print("Trainer initialized and ready!")
