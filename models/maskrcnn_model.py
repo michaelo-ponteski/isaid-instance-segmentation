@@ -90,7 +90,7 @@ class MaskRCNNTrainer:
     def train_one_epoch(self, data_loader):
         """Train for one epoch"""
         from tqdm import tqdm
-        
+
         self.model.train()
         total_loss = 0
 
@@ -116,7 +116,7 @@ class MaskRCNNTrainer:
     def validate(self, data_loader):
         """Validate the model"""
         from tqdm import tqdm
-        
+
         self.model.eval()
         total_loss = 0
 
@@ -170,7 +170,7 @@ def train_model(
 
     def collate_fn(batch):
         return tuple(zip(*batch))
-    
+
     # Apply transforms if not already applied
     if train_dataset.transforms is None:
         train_dataset.transforms = T.ToTensor()
@@ -216,6 +216,7 @@ def train_model(
 
     # Training loop
     from tqdm import tqdm
+
     for epoch in tqdm(range(num_epochs), desc="Epochs"):
         # Train
         train_loss = trainer.train_one_epoch(train_loader)
@@ -228,6 +229,8 @@ def train_model(
         # Update learning rate
         lr_scheduler.step()
 
-        tqdm.write(f"Epoch {epoch+1}/{num_epochs} - Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}")
+        tqdm.write(
+            f"Epoch {epoch+1}/{num_epochs} - Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}"
+        )
 
     return trainer, history
