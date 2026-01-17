@@ -89,13 +89,21 @@ class MaskRCNNTrainer:
 
     def train_one_epoch(self, data_loader):
         """Train for one epoch"""
+        from tqdm.auto import tqdm
+
         self.model.train()
         total_loss = 0
 
-        for images, targets in data_loader:
+        for images, targets in tqdm(data_loader, desc="Training", leave=False):
             # Move to device
             images = [img.to(self.device) for img in images]
-            targets = [{k: v.to(self.device) for k, v in t.items()} for t in targets]
+            targets = [
+                {
+                    k: v.to(self.device) if isinstance(v, torch.Tensor) else v
+                    for k, v in t.items()
+                }
+                for t in targets
+            ]
 
             # Forward pass
             loss_dict = self.model(images, targets)
@@ -113,11 +121,13 @@ class MaskRCNNTrainer:
     @torch.no_grad()
     def validate(self, data_loader):
         """Validate the model"""
+        from tqdm.auto import tqdm
+
         self.model.train()  # Keep in train mode to get losses
         total_loss = 0
         num_batches = 0
 
-        for images, targets in data_loader:
+        for images, targets in tqdm(data_loader, desc="Validation", leave=False):
             images = [img.to(self.device) for img in images]
             targets = [
                 {
@@ -144,6 +154,101 @@ class MaskRCNNTrainer:
         images = [img.to(self.device) for img in images]
         predictions = self.model(images)
         return predictions
+
+
+def train_model(
+    train_dataset,
+    val_dataset,
+    num_classes=16,
+    num_epochs=20,
+    batch_size=2,
+    lr=0.005,
+    device="cuda",
+):
+    """
+    Simple training function for Mask R-CNN.
+
+    Args:
+        train_dataset: Training dataset
+        val_dataset: Validation dataset
+        num_classes: Number of classes (default 16 for iSAID)
+        num_epochs: Number of training epochs
+        batch_size: Batch size
+        lr: Learning rate
+        device: Device to train on
+
+    Returns:
+        trainer: Trained MaskRCNNTrainer object
+        history: Dictionary with training history
+    """
+    from torch.utils.data import DataLoader
+    from torchvision import transforms as T
+    from tqdm.auto import tqdm
+
+    def collate_fn(batch):
+        return tuple(zip(*batch))
+
+    # Apply transforms if not already applied
+    if train_dataset.transforms is None:
+        train_dataset.transforms = T.ToTensor()
+    if val_dataset.transforms is None:
+        val_dataset.transforms = T.ToTensor()
+
+    # Create data loaders
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=4,
+        collate_fn=collate_fn,
+    )
+
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=4,
+        collate_fn=collate_fn,
+    )
+
+    # Create model
+    model = get_maskrcnn_model(num_classes, pretrained=True)
+
+    # Create optimizer
+    params = [p for p in model.parameters() if p.requires_grad]
+    optimizer = torch.optim.SGD(params, lr=lr, momentum=0.9, weight_decay=0.0005)
+
+    # Learning rate scheduler
+    lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=5, gamma=0.1)
+
+    # Initialize trainer
+    device = torch.device(device if torch.cuda.is_available() else "cpu")
+    trainer = MaskRCNNTrainer(model, optimizer, device)
+
+    # Training history
+    history = {"train_loss": [], "val_loss": []}
+
+    print(f"Training on {device}")
+    print(f"Train samples: {len(train_dataset)}, Val samples: {len(val_dataset)}")
+
+    # Training loop
+    for epoch in tqdm(range(num_epochs), desc="Epochs"):
+        # Train
+        train_loss = trainer.train_one_epoch(train_loader)
+        history["train_loss"].append(train_loss)
+
+        # Validate
+        val_loss = trainer.validate(val_loader)
+        history["val_loss"].append(val_loss)
+
+        # Update learning rate
+        lr_scheduler.step()
+
+        tqdm.write(
+            f"Epoch {epoch+1}/{num_epochs} - Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}"
+        )
+
+    return trainer, history
 
 
 # Example usage
