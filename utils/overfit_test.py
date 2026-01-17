@@ -1,16 +1,12 @@
 import torch
-import torchvision
 from torchvision import transforms
 import matplotlib.pyplot as plt
 import numpy as np
-from PIL import Image, ImageDraw
-import copy
 
 
 def overfit_single_image_test(model, dataset, idx=0, num_epochs=100, device="cuda"):
     """
-    Test if model can overfit to a single image.
-    This is a sanity check to ensure the model can learn.
+    Test if model can overfit to a single image - a sanity check to ensure the model can learn.
 
     Args:
         model: Mask R-CNN model
@@ -18,35 +14,34 @@ def overfit_single_image_test(model, dataset, idx=0, num_epochs=100, device="cud
         idx: Index of image to overfit
         num_epochs: Number of epochs to train
         device: Device to use
+
+    Returns:
+        losses_history: List of loss values
+        prediction: Final prediction on the image
     """
-    print("=" * 80)
-    print("OVERFIT SINGLE IMAGE TEST")
-    print("=" * 80)
+    print("=" * 60)
+    print("OVERFIT TEST - Single Image")
+    print("=" * 60)
 
     # Get single image and target
     image, target = dataset[idx]
 
     # Convert to tensor if needed
     if not isinstance(image, torch.Tensor):
-        transform = transforms.Compose(
-            [
-                transforms.ToTensor(),
-            ]
-        )
-        image = transform(image)
+        image = transforms.ToTensor()(image)
 
-    print(f"\nImage shape: {image.shape}")
+    print(f"Image shape: {image.shape}")
     print(f"Number of instances: {len(target['boxes'])}")
-    print(f"Classes: {target['labels'].tolist()}")
 
     # Move to device
+    device = torch.device(device if torch.cuda.is_available() else "cpu")
     model = model.to(device)
     image = image.to(device)
     target = {
         k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in target.items()
     }
 
-    # Create optimizer - SGD with momentum works better for detection models
+    # Create optimizer
     params = [p for p in model.parameters() if p.requires_grad]
     optimizer = torch.optim.SGD(params, lr=0.005, momentum=0.9, weight_decay=0.0005)
 
@@ -54,7 +49,6 @@ def overfit_single_image_test(model, dataset, idx=0, num_epochs=100, device="cud
     model.train()
     losses_history = []
 
-    print(f"\nTraining for {num_epochs} epochs...")
     for epoch in range(num_epochs):
         # Forward pass
         loss_dict = model([image], [target])
@@ -68,69 +62,42 @@ def overfit_single_image_test(model, dataset, idx=0, num_epochs=100, device="cud
         losses_history.append(losses.item())
 
         # Print progress
-        if (epoch + 1) % 10 == 0:
-            print(f"Epoch [{epoch+1}/{num_epochs}], Loss: {losses.item():.4f}")
-            for k, v in loss_dict.items():
-                print(f"  {k}: {v.item():.4f}")
+        if (epoch + 1) % 20 == 0:
+            print(f"Epoch {epoch+1}/{num_epochs}, Loss: {losses.item():.4f}")
 
     # Plot loss curve
-    plt.figure(figsize=(10, 5))
+    plt.figure(figsize=(10, 4))
     plt.plot(losses_history)
     plt.xlabel("Epoch")
     plt.ylabel("Loss")
-    plt.title("Overfitting Test - Loss Curve")
+    plt.title("Overfit Test - Loss Curve")
     plt.grid(True)
     plt.show()
 
     # Make predictions
     model.eval()
     with torch.no_grad():
-        predictions = model([image])
+        prediction = model([image])[0]
 
-    # Visualize results
-    num_gt = len(target["boxes"])
-    visualize_predictions(image, target, predictions[0], dataset, num_gt=num_gt)
-
-    # Check if model learned
+    # Show results
     final_loss = losses_history[-1]
     initial_loss = losses_history[0]
     improvement = (initial_loss - final_loss) / initial_loss * 100
 
-    print("\n" + "=" * 50)
-    print("RESULTS:")
-    print(f"Initial Loss: {initial_loss:.4f}")
+    print(f"\nInitial Loss: {initial_loss:.4f}")
     print(f"Final Loss: {final_loss:.4f}")
     print(f"Improvement: {improvement:.1f}%")
-    print("=" * 50)
+    print("=" * 60)
 
-    return losses_history, predictions
+    # Visualize
+    visualize_overfit_result(image, target, prediction, dataset)
+
+    return losses_history, prediction
 
 
-def visualize_predictions(
-    image, target, prediction, dataset, conf_threshold=0.5, num_gt=None
-):
-    """
-    Simple visualization of ground truth vs predictions.
-    """
-    # Colors for different classes
-    COLORS = [
-        "red",
-        "blue",
-        "green",
-        "orange",
-        "purple",
-        "cyan",
-        "magenta",
-        "yellow",
-        "lime",
-        "pink",
-        "brown",
-        "navy",
-        "teal",
-        "olive",
-        "coral",
-        "gold",
-    ]
+def visualize_overfit_result(image, target, prediction, dataset, conf_threshold=0.5):
+    """Visualize ground truth vs predictions for overfit test."""
+    COLORS = ["red", "blue", "green", "orange", "purple", "cyan", "magenta", "yellow"]
 
     # Convert image to numpy
     if isinstance(image, torch.Tensor):
@@ -139,13 +106,11 @@ def visualize_predictions(
     else:
         image_np = np.array(image)
 
-    cat_names = dataset.get_category_names()
-    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
 
     # Ground truth
     ax = axes[0]
     ax.imshow(image_np)
-
     if "boxes" in target and len(target["boxes"]) > 0:
         boxes = target["boxes"].cpu().numpy()
         labels = target["labels"].cpu().numpy()
@@ -156,14 +121,12 @@ def visualize_predictions(
                 (x1, y1), x2 - x1, y2 - y1, fill=False, edgecolor=color, linewidth=2
             )
             ax.add_patch(rect)
-
     ax.set_title(f"Ground Truth ({len(target['boxes'])} boxes)")
     ax.axis("off")
 
     # Predictions
     ax = axes[1]
     ax.imshow(image_np)
-
     boxes = prediction["boxes"].cpu().numpy()
     labels = prediction["labels"].cpu().numpy()
     scores = prediction["scores"].cpu().numpy()
@@ -181,64 +144,10 @@ def visualize_predictions(
             (x1, y1), x2 - x1, y2 - y1, fill=False, edgecolor=color, linewidth=2
         )
         ax.add_patch(rect)
-        ax.text(x1, y1 - 3, f"{score:.2f}", color=color, fontsize=8)
+        ax.text(x1, y1 - 3, f"{score:.2f}", color=color, fontsize=10)
 
     ax.set_title(f"Predictions ({len(boxes)} boxes, conf>{conf_threshold})")
     ax.axis("off")
 
-    # Legend for classes that appear
-    used_labels = set(target["labels"].cpu().numpy().tolist())
-    legend_elements = [
-        plt.Line2D(
-            [0],
-            [0],
-            color=COLORS[int(l) % len(COLORS)],
-            linewidth=2,
-            label=cat_names.get(int(l), f"Class {l}"),
-        )
-        for l in used_labels
-    ]
-    fig.legend(
-        handles=legend_elements, loc="lower center", ncol=min(len(used_labels), 5)
-    )
-    ax.axis("off")
-
     plt.tight_layout()
     plt.show()
-
-    # Print comparison
-    if num_gt is not None:
-        print(f"\nFound {len(boxes)} boxes (should be {num_gt})")
-
-
-# Complete example workflow
-if __name__ == "__main__":
-    print("Setting up overfit test...")
-
-    # Import previous components
-    from isaid_dataset import iSAIDDataset
-    from maskrcnn_model import get_maskrcnn_model
-
-    # Setup
-    root_dir = "iSAID_patches"
-    num_classes = 16  # 15 classes + background
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    # Load dataset
-    print("Loading dataset...")
-    train_dataset = iSAIDDataset(root_dir, split="train")
-
-    # Create model
-    print("Creating model...")
-    model = get_maskrcnn_model(num_classes, pretrained=True)
-
-    # Run overfit test
-    print("\nStarting overfit test...")
-    losses, predictions = overfit_single_image_test(
-        model, train_dataset, idx=0, num_epochs=50, device=device  # Use first image
-    )
-
-    print("\nOverfit test complete!")
-    print(
-        "If the model successfully overfitted, you're ready to train on the full dataset."
-    )

@@ -136,33 +136,88 @@ class MaskRCNNTrainer:
         return predictions
 
 
-# Example usage
-if __name__ == "__main__":
-    # Number of classes in iSAID (15 classes + background)
-    # Ship, Storage tank, Baseball diamond, Tennis court, Basketball court,
-    # Ground track field, Bridge, Large vehicle, Small vehicle,
-    # Helicopter, Swimming pool, Roundabout, Soccer ball field,
-    # Plane, Harbor
-    num_classes = 16  # 15 object classes + 1 background
+def train_model(
+    train_dataset,
+    val_dataset,
+    num_classes=16,
+    num_epochs=20,
+    batch_size=2,
+    lr=0.005,
+    device="cuda",
+):
+    """
+    Simple training function for Mask R-CNN.
+
+    Args:
+        train_dataset: Training dataset
+        val_dataset: Validation dataset
+        num_classes: Number of classes (default 16 for iSAID)
+        num_epochs: Number of training epochs
+        batch_size: Batch size
+        lr: Learning rate
+        device: Device to train on
+
+    Returns:
+        trainer: Trained MaskRCNNTrainer object
+        history: Dictionary with training history
+    """
+    from torch.utils.data import DataLoader
+
+    def collate_fn(batch):
+        return tuple(zip(*batch))
+
+    # Create data loaders
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=4,
+        collate_fn=collate_fn,
+    )
+
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=4,
+        collate_fn=collate_fn,
+    )
 
     # Create model
     model = get_maskrcnn_model(num_classes, pretrained=True)
-    print("Model created successfully!")
-
-    # Print model structure
-    print(f"\nModel has {sum(p.numel() for p in model.parameters())} parameters")
-    print(f"Trainable: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
 
     # Create optimizer
     params = [p for p in model.parameters() if p.requires_grad]
-    optimizer = torch.optim.SGD(params, lr=0.005, momentum=0.9, weight_decay=0.0005)
+    optimizer = torch.optim.SGD(params, lr=lr, momentum=0.9, weight_decay=0.0005)
 
-    # Create learning rate scheduler
-    lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=3, gamma=0.1)
+    # Learning rate scheduler
+    lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=5, gamma=0.1)
 
     # Initialize trainer
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device(device if torch.cuda.is_available() else "cpu")
     trainer = MaskRCNNTrainer(model, optimizer, device)
 
-    print(f"\nUsing device: {device}")
-    print("Trainer initialized and ready!")
+    # Training history
+    history = {"train_loss": [], "val_loss": []}
+
+    print(f"Training on {device}")
+    print(f"Train samples: {len(train_dataset)}, Val samples: {len(val_dataset)}")
+
+    # Training loop
+    for epoch in range(num_epochs):
+        print(f"\nEpoch [{epoch+1}/{num_epochs}]")
+
+        # Train
+        train_loss = trainer.train_one_epoch(train_loader)
+        history["train_loss"].append(train_loss)
+
+        # Validate
+        val_loss = trainer.validate(val_loader)
+        history["val_loss"].append(val_loss)
+
+        # Update learning rate
+        lr_scheduler.step()
+
+        print(f"Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}")
+
+    return trainer, history
