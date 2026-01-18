@@ -8,7 +8,7 @@ import gc
 from pathlib import Path
 
 import torch
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 from torch.amp import GradScaler, autocast
 from tqdm.auto import tqdm
 
@@ -34,24 +34,40 @@ class Trainer:
         use_amp=True,
         image_size=800,  # reduced to lower VRAM
         num_workers=2,
+        subset_fraction=1.0,  # Fraction of data to use (0.0 to 1.0)
     ):
         self.device = torch.device(device if torch.cuda.is_available() else "cpu")
         self.use_amp = use_amp and self.device.type == "cuda"
         self.batch_size = batch_size
 
         print("Loading datasets...")
-        self.train_dataset = iSAIDDataset(
+        train_dataset_full = iSAIDDataset(
             data_root,
             split="train",
             transforms=get_transforms(train=True),
             image_size=image_size,
         )
-        self.val_dataset = iSAIDDataset(
+        val_dataset_full = iSAIDDataset(
             data_root,
             split="val",
             transforms=get_transforms(train=False),
             image_size=image_size,
         )
+
+        # Apply subset if needed
+        if subset_fraction < 1.0:
+            train_size = int(len(train_dataset_full) * subset_fraction)
+            val_size = int(len(val_dataset_full) * subset_fraction)
+            train_size = max(1, train_size)  # At least 1 sample
+            val_size = max(1, val_size)
+            
+            self.train_dataset = Subset(train_dataset_full, range(train_size))
+            self.val_dataset = Subset(val_dataset_full, range(val_size))
+            print(f"Using {subset_fraction*100:.1f}% of data: {train_size} train, {val_size} val samples")
+        else:
+            self.train_dataset = train_dataset_full
+            self.val_dataset = val_dataset_full
+            print(f"Using full dataset: {len(train_dataset_full)} train, {len(val_dataset_full)} val samples")
 
         self.train_loader = DataLoader(
             self.train_dataset,
@@ -184,7 +200,7 @@ class Trainer:
 
     @torch.no_grad()
     def validate(self):
-        self.model.eval()
+        self.model.eval()  # Now works because model returns losses when targets provided
         total_loss = 0.0
 
         pbar = tqdm(self.val_loader, desc="Validation")

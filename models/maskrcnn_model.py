@@ -147,8 +147,8 @@ class CustomMaskRCNN(nn.Module):
             targets: List of dicts with boxes, labels, masks
 
         Returns:
-            Training: dict with losses
-            Inference: list of dicts with predictions
+            Training or eval with targets: dict with losses
+            Inference (eval without targets): list of dicts with predictions
         """
         if self.training and targets is None:
             raise ValueError("In training mode, targets should be passed")
@@ -176,7 +176,8 @@ class CustomMaskRCNN(nn.Module):
         )
 
         # 4. Aggregate losses or return predictions
-        if self.training:
+        # Return losses if in training mode OR if targets are provided in eval mode
+        if self.training or targets is not None:
             losses = {}
             losses.update(proposal_losses)
             losses.update(detector_losses)
