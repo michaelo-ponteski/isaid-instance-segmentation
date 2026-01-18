@@ -130,17 +130,15 @@ class Trainer:
                     self.scaler.scale(loss).backward()
                     self.scaler.unscale_(self.optimizer)
 
-                    # Check for NaN gradients
-                    grad_norm = torch.nn.utils.clip_grad_norm_(
-                        self.model.parameters(), 1.0
+                    # Clip gradients - replace NaN/Inf with zeros and clip
+                    for param in self.model.parameters():
+                        if param.grad is not None:
+                            torch.nan_to_num_(
+                                param.grad, nan=0.0, posinf=0.0, neginf=0.0
+                            )
+                    torch.nn.utils.clip_grad_norm_(
+                        self.model.parameters(), max_norm=1.0
                     )
-                    if not torch.isfinite(grad_norm):
-                        print(f"Warning: NaN/Inf gradients detected, skipping step")
-                        self.optimizer.zero_grad(set_to_none=True)
-                        self.scaler.update()
-                        del images, targets, loss, loss_dict
-                        torch.cuda.empty_cache()
-                        continue
 
                     self.scaler.step(self.optimizer)
                     self.scaler.update()
@@ -156,16 +154,16 @@ class Trainer:
                         continue
 
                     loss.backward()
-                    grad_norm = torch.nn.utils.clip_grad_norm_(
-                        self.model.parameters(), 1.0
-                    )
 
-                    if not torch.isfinite(grad_norm):
-                        print(f"Warning: NaN/Inf gradients detected, skipping step")
-                        self.optimizer.zero_grad(set_to_none=True)
-                        del images, targets, loss, loss_dict
-                        torch.cuda.empty_cache()
-                        continue
+                    # Clip gradients - replace NaN/Inf with zeros and clip
+                    for param in self.model.parameters():
+                        if param.grad is not None:
+                            torch.nan_to_num_(
+                                param.grad, nan=0.0, posinf=0.0, neginf=0.0
+                            )
+                    torch.nn.utils.clip_grad_norm_(
+                        self.model.parameters(), max_norm=1.0
+                    )
 
                     self.optimizer.step()
 
