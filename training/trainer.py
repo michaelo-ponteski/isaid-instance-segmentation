@@ -60,14 +60,18 @@ class Trainer:
             val_size = int(len(val_dataset_full) * subset_fraction)
             train_size = max(1, train_size)  # At least 1 sample
             val_size = max(1, val_size)
-            
+
             self.train_dataset = Subset(train_dataset_full, range(train_size))
             self.val_dataset = Subset(val_dataset_full, range(val_size))
-            print(f"Using {subset_fraction*100:.1f}% of data: {train_size} train, {val_size} val samples")
+            print(
+                f"Using {subset_fraction*100:.1f}% of data: {train_size} train, {val_size} val samples"
+            )
         else:
             self.train_dataset = train_dataset_full
             self.val_dataset = val_dataset_full
-            print(f"Using full dataset: {len(train_dataset_full)} train, {len(val_dataset_full)} val samples")
+            print(
+                f"Using full dataset: {len(train_dataset_full)} train, {len(val_dataset_full)} val samples"
+            )
 
         self.train_loader = DataLoader(
             self.train_dataset,
@@ -200,7 +204,7 @@ class Trainer:
 
     @torch.no_grad()
     def validate(self):
-        self.model.eval()  # Now works because model returns losses when targets provided
+        self.model.train()
         total_loss = 0.0
 
         pbar = tqdm(self.val_loader, desc="Validation")
@@ -208,24 +212,21 @@ class Trainer:
         for images, targets in pbar:
             images = [img.to(self.device, non_blocking=True) for img in images]
             targets = [
-                {
-                    k: v.to(self.device) if isinstance(v, torch.Tensor) else v
-                    for k, v in t.items()
-                }
+                {k: v.to(self.device) if isinstance(v, torch.Tensor) else v for k, v in t.items()}
                 for t in targets
             ]
 
-            loss_dict = self.model(images, targets)
-            loss = sum(loss_dict.values())
-
-            loss_value = loss.item()
-            total_loss += loss_value
-            pbar.set_postfix(loss=f"{loss_value:.4f}")
+            with autocast(device_type="cuda", dtype=torch.float16) if self.use_amp else torch.no_grad():
+                loss_dict = self.model(images, targets)
+                loss = sum(loss_dict[k] for k in loss_dict)  # <- sum tylko po tensorach
+            total_loss += loss.item()
+            pbar.set_postfix(loss=f"{loss.item():.4f}")
 
             del images, targets, loss, loss_dict
             torch.cuda.empty_cache()
 
         return total_loss / len(self.val_loader)
+
 
     def save_checkpoint(self, path, epoch, val_loss):
         Path(path).parent.mkdir(parents=True, exist_ok=True)
