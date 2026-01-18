@@ -14,18 +14,27 @@ class iSAIDDataset(Dataset):
     Supports train/val/test splits with COCO-format annotations.
     """
 
-    def __init__(self, root_dir, split="train", transforms=None, filter_empty=True):
+    def __init__(
+        self,
+        root_dir,
+        split="train",
+        transforms=None,
+        filter_empty=True,
+        image_size=800,
+    ):
         """
         Args:
             root_dir: Path to iSAID_patches directory
             split: 'train', 'val', or 'test'
             transforms: Optional transforms to apply
             filter_empty: If True, filter out images without annotations
+            image_size: Target size for images (images will be resized to square)
         """
         self.root_dir = root_dir
         self.split = split
         self.transforms = transforms
         self.filter_empty = filter_empty
+        self.image_size = image_size
 
         # Setup paths
         self.img_dir = os.path.join(root_dir, split, "images")
@@ -82,6 +91,7 @@ class iSAIDDataset(Dataset):
 
         # Load image
         image = Image.open(img_path).convert("RGB")
+        orig_width, orig_height = image.size
 
         # Prepare target dict
         target = {"image_id": img_info["id"]}
@@ -117,21 +127,66 @@ class iSAIDDataset(Dataset):
                     masks.append(mask)
 
             if len(boxes) > 0:
+                boxes = np.array(boxes, dtype=np.float32)
+                masks = np.array(masks, dtype=np.uint8)
+
+                # Resize image and adjust boxes/masks if image_size is specified
+                if self.image_size is not None:
+                    # Calculate scale factors
+                    scale_x = self.image_size / orig_width
+                    scale_y = self.image_size / orig_height
+
+                    # Resize image
+                    image = image.resize(
+                        (self.image_size, self.image_size), Image.BILINEAR
+                    )
+
+                    # Scale boxes
+                    boxes[:, [0, 2]] *= scale_x  # x coordinates
+                    boxes[:, [1, 3]] *= scale_y  # y coordinates
+
+                    # Resize masks
+                    resized_masks = []
+                    for mask in masks:
+                        mask_img = Image.fromarray(mask)
+                        resized_mask = mask_img.resize(
+                            (self.image_size, self.image_size), Image.NEAREST
+                        )
+                        resized_masks.append(np.array(resized_mask))
+                    masks = np.array(resized_masks, dtype=np.uint8)
+
                 target["boxes"] = torch.as_tensor(boxes, dtype=torch.float32)
                 target["labels"] = torch.as_tensor(labels, dtype=torch.int64)
-                target["masks"] = torch.as_tensor(np.array(masks), dtype=torch.uint8)
+                target["masks"] = torch.as_tensor(masks, dtype=torch.uint8)
                 target["area"] = torch.as_tensor(areas, dtype=torch.float32)
                 target["iscrowd"] = torch.zeros(len(boxes), dtype=torch.int64)
             else:
                 # No annotations
+                target_height = (
+                    self.image_size
+                    if self.image_size is not None
+                    else img_info["height"]
+                )
+                target_width = (
+                    self.image_size
+                    if self.image_size is not None
+                    else img_info["width"]
+                )
                 target["boxes"] = torch.zeros((0, 4), dtype=torch.float32)
                 target["labels"] = torch.zeros(0, dtype=torch.int64)
                 target["masks"] = torch.zeros(
-                    (0, img_info["height"], img_info["width"]), dtype=torch.uint8
+                    (0, target_height, target_width), dtype=torch.uint8
                 )
+
+        # Resize image for test split too
+        if self.split == "test" and self.image_size is not None:
+            image = image.resize((self.image_size, self.image_size), Image.BILINEAR)
 
         if self.transforms:
             image = self.transforms(image)
+        else:
+            # Convert PIL Image to tensor if no transforms provided
+            image = transforms.ToTensor()(image)
 
         return image, target
 

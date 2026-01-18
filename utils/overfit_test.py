@@ -47,9 +47,9 @@ def overfit_single_image_test(model, dataset, idx=0, num_epochs=100, device="cud
         k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in target.items()
     }
 
-    # Create optimizer with lower learning rate for stability
+    # Use AdamW for more stable training
     params = [p for p in model.parameters() if p.requires_grad]
-    optimizer = torch.optim.SGD(params, lr=0.001, momentum=0.9, weight_decay=0.0005)
+    optimizer = torch.optim.AdamW(params, lr=0.0001, weight_decay=0.01)
 
     # Training loop
     model.train()
@@ -70,8 +70,8 @@ def overfit_single_image_test(model, dataset, idx=0, num_epochs=100, device="cud
         optimizer.zero_grad()
         losses.backward()
 
-        # Gradient clipping to prevent explosion
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        # Gradient clipping to prevent explosion (tighter=more stable)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
 
         optimizer.step()
 
@@ -219,36 +219,3 @@ def visualize_predictions(
     # Print comparison
     if num_gt is not None:
         print(f"\nFound {len(boxes)} boxes (should be {num_gt})")
-
-
-# Complete example workflow
-if __name__ == "__main__":
-    print("Setting up overfit test...")
-
-    # Import previous components
-    from isaid_dataset import iSAIDDataset
-    from maskrcnn_model import get_maskrcnn_model
-
-    # Setup
-    root_dir = "iSAID_patches"
-    num_classes = 16  # 15 classes + background
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    # Load dataset
-    print("Loading dataset...")
-    train_dataset = iSAIDDataset(root_dir, split="train")
-
-    # Create model
-    print("Creating model...")
-    model = get_maskrcnn_model(num_classes, pretrained=True)
-
-    # Run overfit test
-    print("\nStarting overfit test...")
-    losses, predictions = overfit_single_image_test(
-        model, train_dataset, idx=0, num_epochs=50, device=device  # Use first image
-    )
-
-    print("\nOverfit test complete!")
-    print(
-        "If the model successfully overfitted, you're ready to train on the full dataset."
-    )
