@@ -113,6 +113,7 @@ class Trainer:
     def train_epoch(self, epoch):
         self.model.train()
         total_loss = 0.0
+        loss_accumulator = {}
 
         pbar = tqdm(self.train_loader, desc=f"Train Epoch {epoch}")
 
@@ -189,6 +190,10 @@ class Trainer:
 
                 loss_value = loss.item()
                 total_loss += loss_value
+                # Accumulate individual losses
+                for k, v in loss_dict.items():
+                    loss_accumulator.setdefault(k, 0.0)
+                    loss_accumulator[k] += v.item()
                 # Show all losses in pbar
                 loss_postfix = {k: f"{v.item():.4f}" for k, v in loss_dict.items()}
                 loss_postfix["total"] = f"{loss_value:.4f}"
@@ -203,27 +208,43 @@ class Trainer:
             torch.cuda.empty_cache()
 
         self.scheduler.step()
-        return total_loss / len(self.train_loader)
+        # Return average losses
+        avg_losses = {
+            k: v / len(self.train_loader) for k, v in loss_accumulator.items()
+        }
+        avg_losses["total"] = total_loss / len(self.train_loader)
+        return avg_losses
 
     @torch.no_grad()
     def validate(self):
         self.model.train()
         total_loss = 0.0
+        loss_accumulator = {}
 
         pbar = tqdm(self.val_loader, desc="Validation")
-
 
         for images, targets in pbar:
             images = [img.to(self.device, non_blocking=True) for img in images]
             targets = [
-                {k: v.to(self.device) if isinstance(v, torch.Tensor) else v for k, v in t.items()}
+                {
+                    k: v.to(self.device) if isinstance(v, torch.Tensor) else v
+                    for k, v in t.items()
+                }
                 for t in targets
             ]
 
-            with autocast(device_type="cuda", dtype=torch.float16) if self.use_amp else torch.no_grad():
+            with (
+                autocast(device_type="cuda", dtype=torch.float16)
+                if self.use_amp
+                else torch.no_grad()
+            ):
                 loss_dict = self.model(images, targets)
                 loss = sum(loss_dict[k] for k in loss_dict)
             total_loss += loss.item()
+            # Accumulate individual losses
+            for k, v in loss_dict.items():
+                loss_accumulator.setdefault(k, 0.0)
+                loss_accumulator[k] += v.item()
             # Show all losses in pbar
             loss_postfix = {k: f"{v.item():.4f}" for k, v in loss_dict.items()}
             loss_postfix["total"] = f"{loss.item():.4f}"
@@ -232,8 +253,10 @@ class Trainer:
             del images, targets, loss, loss_dict
             torch.cuda.empty_cache()
 
-        return total_loss / len(self.val_loader)
-
+        # Return average losses
+        avg_losses = {k: v / len(self.val_loader) for k, v in loss_accumulator.items()}
+        avg_losses["total"] = total_loss / len(self.val_loader)
+        return avg_losses
 
     def save_checkpoint(self, path, epoch, val_loss):
         Path(path).parent.mkdir(parents=True, exist_ok=True)
@@ -247,6 +270,17 @@ class Trainer:
             path,
         )
 
+    def load_checkpoint(self, path):
+        """Load model from checkpoint file."""
+        checkpoint = torch.load(path, map_location=self.device)
+        self.model.load_state_dict(checkpoint["model_state_dict"])
+        if "optimizer_state_dict" in checkpoint:
+            self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        print(f"Loaded checkpoint from {path}")
+        print(f"  Epoch: {checkpoint.get('epoch', 'N/A')}")
+        print(f"  Val Loss: {checkpoint.get('val_loss', 'N/A'):.4f}")
+        return checkpoint
+
     def fit(self, epochs=20, save_dir="checkpoints"):
         best_loss = float("inf")
 
@@ -256,16 +290,20 @@ class Trainer:
             print(f"{'=' * 50}")
 
             start = time.time()
-            train_loss = self.train_epoch(epoch)
-            val_loss = self.validate()
+            train_losses = self.train_epoch(epoch)
+            val_losses = self.validate()
             epoch_time = time.time() - start
 
-            print(
-                f"Train Loss: {train_loss:.4f} | "
-                f"Val Loss: {val_loss:.4f} | "
-                f"Time: {epoch_time:.1f}s"
-            )
+            # Print detailed losses
+            print(f"\nEpoch {epoch} Results (Time: {epoch_time:.1f}s):")
+            print(f"  Train Losses:")
+            for k, v in train_losses.items():
+                print(f"    {k}: {v:.4f}")
+            print(f"  Val Losses:")
+            for k, v in val_losses.items():
+                print(f"    {k}: {v:.4f}")
 
+            val_loss = val_losses["total"]
             self.save_checkpoint(f"{save_dir}/last.pth", epoch, val_loss)
 
             if val_loss < best_loss:
@@ -277,6 +315,143 @@ class Trainer:
             torch.cuda.empty_cache()
 
         print(f"\nTraining complete. Best val loss: {best_loss:.4f}")
+
+    @torch.no_grad()
+    def visualize_predictions(self, num_samples=5, score_threshold=0.5, save_path=None):
+        """Visualize model predictions on validation set.
+
+        Args:
+            num_samples: Number of validation samples to visualize
+            score_threshold: Minimum confidence score for predictions
+            save_path: Optional path to save the figure
+        """
+        import matplotlib.pyplot as plt
+        import matplotlib.patches as patches
+        import numpy as np
+
+        self.model.eval()
+
+        # Get category names if available
+        if hasattr(self.val_dataset, "dataset"):
+            dataset = self.val_dataset.dataset
+        else:
+            dataset = self.val_dataset
+
+        category_names = (
+            dataset.get_category_names()
+            if hasattr(dataset, "get_category_names")
+            else {}
+        )
+
+        # Select random samples
+        indices = np.random.choice(
+            len(self.val_dataset),
+            min(num_samples, len(self.val_dataset)),
+            replace=False,
+        )
+
+        fig, axes = plt.subplots(num_samples, 2, figsize=(16, 5 * num_samples))
+        if num_samples == 1:
+            axes = axes.reshape(1, -1)
+
+        for idx, sample_idx in enumerate(indices):
+            image, target = self.val_dataset[sample_idx]
+
+            # Convert image for visualization
+            if isinstance(image, torch.Tensor):
+                img_display = image.permute(1, 2, 0).cpu().numpy()
+            else:
+                img_display = np.array(image)
+
+            # Normalize if needed
+            if img_display.max() <= 1.0:
+                img_display = (img_display * 255).astype(np.uint8)
+
+            # Get predictions
+            image_tensor = (
+                image.unsqueeze(0).to(self.device)
+                if len(image.shape) == 3
+                else image.to(self.device)
+            )
+            predictions = self.model([image_tensor])[0]
+
+            # Filter predictions by score
+            keep_idx = predictions["scores"] > score_threshold
+            pred_boxes = predictions["boxes"][keep_idx].cpu().numpy()
+            pred_labels = predictions["labels"][keep_idx].cpu().numpy()
+            pred_scores = predictions["scores"][keep_idx].cpu().numpy()
+
+            # Ground truth visualization
+            ax_gt = axes[idx, 0]
+            ax_gt.imshow(img_display)
+            ax_gt.set_title(f"Ground Truth (Sample {sample_idx})")
+            ax_gt.axis("off")
+
+            if "boxes" in target and len(target["boxes"]) > 0:
+                gt_boxes = target["boxes"].cpu().numpy()
+                gt_labels = target["labels"].cpu().numpy()
+
+                for box, label in zip(gt_boxes, gt_labels):
+                    x1, y1, x2, y2 = box
+                    rect = patches.Rectangle(
+                        (x1, y1),
+                        x2 - x1,
+                        y2 - y1,
+                        linewidth=2,
+                        edgecolor="green",
+                        facecolor="none",
+                    )
+                    ax_gt.add_patch(rect)
+
+                    cat_name = category_names.get(int(label), f"Class {label}")
+                    ax_gt.text(
+                        x1,
+                        y1 - 5,
+                        cat_name,
+                        color="white",
+                        fontsize=8,
+                        bbox=dict(facecolor="green", alpha=0.7),
+                    )
+
+            # Predictions visualization
+            ax_pred = axes[idx, 1]
+            ax_pred.imshow(img_display)
+            ax_pred.set_title(
+                f"Predictions (Sample {sample_idx}, {len(pred_boxes)} detections)"
+            )
+            ax_pred.axis("off")
+
+            for box, label, score in zip(pred_boxes, pred_labels, pred_scores):
+                x1, y1, x2, y2 = box
+                rect = patches.Rectangle(
+                    (x1, y1),
+                    x2 - x1,
+                    y2 - y1,
+                    linewidth=2,
+                    edgecolor="red",
+                    facecolor="none",
+                )
+                ax_pred.add_patch(rect)
+
+                cat_name = category_names.get(int(label), f"Class {label}")
+                ax_pred.text(
+                    x1,
+                    y1 - 5,
+                    f"{cat_name} {score:.2f}",
+                    color="white",
+                    fontsize=8,
+                    bbox=dict(facecolor="red", alpha=0.7),
+                )
+
+        plt.tight_layout()
+
+        if save_path:
+            plt.savefig(save_path, dpi=150, bbox_inches="tight")
+            print(f"Saved visualization to {save_path}")
+
+        plt.show()
+
+        self.model.train()
 
 
 def train(
