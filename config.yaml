@@ -3,8 +3,8 @@
 # Dataset
 data:
   root_dir: "iSAID_patches"
-  num_classes: 16  # 15 classes + background
-  image_size: 800  # Keep 800 for small objects in satellite images
+  num_classes: 16 # 15 classes + background
+  image_size: 800 # Keep 800 for small objects in satellite images
 
 # Model
 model:
@@ -14,8 +14,8 @@ model:
 training:
   epochs: 20
   batch_size: 4
-  lr: 0.005
-  amp: true  # Mixed precision for memory
+  lr: 0.0001
+  amp: true # Mixed precision for memory
 
 # Checkpoints
 checkpoint:

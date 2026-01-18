@@ -129,6 +129,8 @@ class iSAIDDataset(Dataset):
             if len(boxes) > 0:
                 boxes = np.array(boxes, dtype=np.float32)
                 masks = np.array(masks, dtype=np.uint8)
+                labels = np.array(labels, dtype=np.int64)
+                areas = np.array(areas, dtype=np.float32)
 
                 # Resize image and adjust boxes/masks if image_size is specified
                 if self.image_size is not None:
@@ -154,6 +156,29 @@ class iSAIDDataset(Dataset):
                         )
                         resized_masks.append(np.array(resized_mask))
                     masks = np.array(resized_masks, dtype=np.uint8)
+
+                # Filter out invalid boxes (zero or negative width/height)
+                # This prevents NaN loss during training
+                widths = boxes[:, 2] - boxes[:, 0]
+                heights = boxes[:, 3] - boxes[:, 1]
+                min_size = 1.0  # Minimum box size in pixels
+                valid_mask = (widths >= min_size) & (heights >= min_size)
+
+                # Also filter out boxes outside image bounds
+                img_h = self.image_size if self.image_size else img_info["height"]
+                img_w = self.image_size if self.image_size else img_info["width"]
+                valid_mask &= (boxes[:, 0] >= 0) & (boxes[:, 1] >= 0)
+                valid_mask &= (boxes[:, 2] <= img_w) & (boxes[:, 3] <= img_h)
+
+                # Clamp boxes to image bounds
+                boxes[:, [0, 2]] = np.clip(boxes[:, [0, 2]], 0, img_w)
+                boxes[:, [1, 3]] = np.clip(boxes[:, [1, 3]], 0, img_h)
+
+                if valid_mask.sum() > 0:
+                    boxes = boxes[valid_mask]
+                    labels = labels[valid_mask]
+                    masks = masks[valid_mask]
+                    areas = areas[valid_mask]
 
                 target["boxes"] = torch.as_tensor(boxes, dtype=torch.float32)
                 target["labels"] = torch.as_tensor(labels, dtype=torch.int64)

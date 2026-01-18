@@ -29,7 +29,7 @@ class Trainer:
         data_root,
         num_classes=16,
         batch_size=2,
-        lr=0.005,
+        lr=0.0001,  # Reduced from 0.005 to prevent NaN loss
         device="cuda",
         use_amp=True,
         image_size=800,  # reduced to lower VRAM
@@ -108,26 +108,75 @@ class Trainer:
 
             self.optimizer.zero_grad(set_to_none=True)
 
-            if self.use_amp:
-                with autocast(device_type="cuda", dtype=torch.float16):
+            # Skip batches with no valid targets
+            valid_targets = [t for t in targets if len(t["boxes"]) > 0]
+            if len(valid_targets) == 0:
+                continue
+
+            try:
+                if self.use_amp:
+                    with autocast(device_type="cuda", dtype=torch.float16):
+                        loss_dict = self.model(images, targets)
+                        loss = sum(loss_dict.values())
+
+                    # Check for NaN/Inf before backward
+                    if not torch.isfinite(loss):
+                        print(f"Warning: NaN/Inf loss detected, skipping batch")
+                        self.scaler.update()  # Still update scaler to prevent stall
+                        del images, targets, loss, loss_dict
+                        torch.cuda.empty_cache()
+                        continue
+
+                    self.scaler.scale(loss).backward()
+                    self.scaler.unscale_(self.optimizer)
+
+                    # Check for NaN gradients
+                    grad_norm = torch.nn.utils.clip_grad_norm_(
+                        self.model.parameters(), 1.0
+                    )
+                    if not torch.isfinite(grad_norm):
+                        print(f"Warning: NaN/Inf gradients detected, skipping step")
+                        self.optimizer.zero_grad(set_to_none=True)
+                        self.scaler.update()
+                        del images, targets, loss, loss_dict
+                        torch.cuda.empty_cache()
+                        continue
+
+                    self.scaler.step(self.optimizer)
+                    self.scaler.update()
+                else:
                     loss_dict = self.model(images, targets)
                     loss = sum(loss_dict.values())
 
-                self.scaler.scale(loss).backward()
-                self.scaler.unscale_(self.optimizer)
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), 0.5)
-                self.scaler.step(self.optimizer)
-                self.scaler.update()
-            else:
-                loss_dict = self.model(images, targets)
-                loss = sum(loss_dict.values())
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), 0.5)
-                self.optimizer.step()
+                    # Check for NaN/Inf before backward
+                    if not torch.isfinite(loss):
+                        print(f"Warning: NaN/Inf loss detected, skipping batch")
+                        del images, targets, loss, loss_dict
+                        torch.cuda.empty_cache()
+                        continue
 
-            loss_value = loss.item()
-            total_loss += loss_value
-            pbar.set_postfix(loss=f"{loss_value:.4f}")
+                    loss.backward()
+                    grad_norm = torch.nn.utils.clip_grad_norm_(
+                        self.model.parameters(), 1.0
+                    )
+
+                    if not torch.isfinite(grad_norm):
+                        print(f"Warning: NaN/Inf gradients detected, skipping step")
+                        self.optimizer.zero_grad(set_to_none=True)
+                        del images, targets, loss, loss_dict
+                        torch.cuda.empty_cache()
+                        continue
+
+                    self.optimizer.step()
+
+                loss_value = loss.item()
+                total_loss += loss_value
+                pbar.set_postfix(loss=f"{loss_value:.4f}")
+            except RuntimeError as e:
+                print(f"Warning: RuntimeError in batch: {e}, skipping")
+                self.optimizer.zero_grad(set_to_none=True)
+                torch.cuda.empty_cache()
+                continue
 
             del images, targets, loss, loss_dict
             torch.cuda.empty_cache()
