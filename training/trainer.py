@@ -189,7 +189,10 @@ class Trainer:
 
                 loss_value = loss.item()
                 total_loss += loss_value
-                pbar.set_postfix(loss=f"{loss_value:.4f}")
+                # Show all losses in pbar
+                loss_postfix = {k: f"{v.item():.4f}" for k, v in loss_dict.items()}
+                loss_postfix["total"] = f"{loss_value:.4f}"
+                pbar.set_postfix(loss=loss_postfix)
             except RuntimeError as e:
                 print(f"Warning: RuntimeError in batch: {e}, skipping")
                 self.optimizer.zero_grad(set_to_none=True)
@@ -209,6 +212,7 @@ class Trainer:
 
         pbar = tqdm(self.val_loader, desc="Validation")
 
+
         for images, targets in pbar:
             images = [img.to(self.device, non_blocking=True) for img in images]
             targets = [
@@ -218,9 +222,12 @@ class Trainer:
 
             with autocast(device_type="cuda", dtype=torch.float16) if self.use_amp else torch.no_grad():
                 loss_dict = self.model(images, targets)
-                loss = sum(loss_dict[k] for k in loss_dict)  # <- sum tylko po tensorach
+                loss = sum(loss_dict[k] for k in loss_dict)
             total_loss += loss.item()
-            pbar.set_postfix(loss=f"{loss.item():.4f}")
+            # Show all losses in pbar
+            loss_postfix = {k: f"{v.item():.4f}" for k, v in loss_dict.items()}
+            loss_postfix["total"] = f"{loss.item():.4f}"
+            pbar.set_postfix(loss=loss_postfix)
 
             del images, targets, loss, loss_dict
             torch.cuda.empty_cache()
