@@ -203,9 +203,117 @@ class CustomMaskRCNN(nn.Module):
         }
 
 
-def get_custom_maskrcnn(num_classes, pretrained_backbone=True):
-    """Factory function to create custom Mask R-CNN model."""
+def get_custom_maskrcnn(
+    num_classes,
+    pretrained_backbone=True,
+    rpn_anchor_sizes=None,
+    rpn_aspect_ratios=None,
+    optimized_anchors=False,
+    anchor_config=None,
+):
+    """
+    Factory function to create custom Mask R-CNN model.
+    
+    Args:
+        num_classes: Number of classes including background
+        pretrained_backbone: Whether to use pretrained backbone
+        rpn_anchor_sizes: Custom anchor sizes (tuple of tuples)
+        rpn_aspect_ratios: Custom aspect ratios (tuple of tuples)
+        optimized_anchors: If True and anchor_config is None, use data-suggested anchors
+        anchor_config: AnchorConfig object from anchor optimizer
+        
+    Returns:
+        CustomMaskRCNN model
+    """
+    # Default anchor configuration for satellite imagery
+    default_anchor_sizes = ((16, 24), (32, 48), (64, 96), (128, 192))
+    default_aspect_ratios = ((0.5, 1.0, 2.0),) * 4
+    
+    # Use anchor_config if provided
+    if anchor_config is not None:
+        rpn_anchor_sizes = anchor_config.sizes
+        rpn_aspect_ratios = anchor_config.aspect_ratios
+    elif rpn_anchor_sizes is None:
+        rpn_anchor_sizes = default_anchor_sizes
+    
+    if rpn_aspect_ratios is None:
+        rpn_aspect_ratios = default_aspect_ratios
+    
     return CustomMaskRCNN(
         num_classes=num_classes,
         pretrained_backbone=pretrained_backbone,
+        rpn_anchor_sizes=rpn_anchor_sizes,
+        rpn_aspect_ratios=rpn_aspect_ratios,
+    )
+
+
+def get_custom_maskrcnn_with_optimized_anchors(
+    num_classes,
+    data_root,
+    pretrained_backbone=True,
+    n_trials=20,
+    device="cuda",
+    image_size=800,
+    use_cached=True,
+    cache_path="optimized_anchors.pt",
+):
+    """
+    Factory function to create Mask R-CNN with Optuna-optimized anchors.
+    
+    Args:
+        num_classes: Number of classes including background
+        data_root: Dataset root directory for anchor analysis
+        pretrained_backbone: Whether to use pretrained backbone
+        n_trials: Number of Optuna optimization trials
+        device: Device for optimization
+        image_size: Image size for dataset
+        use_cached: Whether to use cached optimization results
+        cache_path: Path to cache file
+        
+    Returns:
+        CustomMaskRCNN model with optimized anchors
+    """
+    import os
+    
+    anchor_config = None
+    
+    # Try to load cached results
+    if use_cached and os.path.exists(cache_path):
+        try:
+            cached = torch.load(cache_path)
+            from training.anchor_optimizer import AnchorConfig
+            anchor_config = AnchorConfig(
+                sizes=cached['sizes'],
+                aspect_ratios=cached['aspect_ratios']
+            )
+            print(f"Loaded cached anchor config from {cache_path}")
+            print(f"  Sizes: {anchor_config.sizes}")
+            print(f"  Ratios: {anchor_config.aspect_ratios}")
+        except Exception as e:
+            print(f"Failed to load cached anchors: {e}")
+    
+    # Run optimization if no cached config
+    if anchor_config is None:
+        from training.anchor_optimizer import optimize_anchors_for_dataset
+        
+        anchor_config = optimize_anchors_for_dataset(
+            data_root=data_root,
+            num_classes=num_classes,
+            n_trials=n_trials,
+            device=device,
+            image_size=image_size,
+        )
+        
+        # Cache results
+        if use_cached:
+            torch.save({
+                'sizes': anchor_config.sizes,
+                'aspect_ratios': anchor_config.aspect_ratios,
+            }, cache_path)
+            print(f"Saved optimized anchors to {cache_path}")
+    
+    return get_custom_maskrcnn(
+        num_classes=num_classes,
+        pretrained_backbone=pretrained_backbone,
+        anchor_config=anchor_config,
     )

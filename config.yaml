@@ -10,6 +10,25 @@ data:
 model:
   pretrained_backbone: true
 
+# RPN Anchor Configuration
+anchors:
+  # Set optimize to true to run Optuna-based anchor optimization
+  optimize: false
+  optimization_trials: 20  # Number of Optuna trials
+  cache_path: "optimized_anchors.pt"  # Cache file for optimized anchors
+  
+  # Custom anchor sizes (used only if optimize=false)
+  # Each tuple corresponds to an FPN level (P2, P3, P4, P5)
+  # Default values are optimized for satellite imagery with small objects
+  sizes:
+    - [16, 24]   # P2 - smallest objects
+    - [32, 48]   # P3
+    - [64, 96]   # P4  
+    - [128, 192] # P5 - largest objects
+  
+  # Aspect ratios for each anchor size
+  aspect_ratios: [0.5, 1.0, 2.0]
+
 # Training
 training:
   epochs: 20

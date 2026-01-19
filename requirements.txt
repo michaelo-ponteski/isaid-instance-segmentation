@@ -7,3 +7,4 @@ opencv-python
 pyyaml
 matplotlib
 timm
+optuna>=3.0.0

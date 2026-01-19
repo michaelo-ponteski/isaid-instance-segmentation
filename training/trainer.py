@@ -6,13 +6,14 @@ import os
 import time
 import gc
 from pathlib import Path
+from typing import Optional, Tuple
 
 import torch
 from torch.utils.data import DataLoader, Subset
 from torch.amp import GradScaler, autocast
 from tqdm.auto import tqdm
 
-from models.maskrcnn_model import get_custom_maskrcnn
+from models.maskrcnn_model import get_custom_maskrcnn, get_custom_maskrcnn_with_optimized_anchors
 from datasets.isaid_dataset import iSAIDDataset
 from training.transforms import get_transforms
 
@@ -35,10 +36,17 @@ class Trainer:
         image_size=800,  # reduced to lower VRAM
         num_workers=2,
         subset_fraction=1.0,  # Fraction of data to use (0.0 to 1.0)
+        # Anchor optimization parameters
+        optimize_anchors=False,  # Enable Optuna anchor optimization
+        anchor_optimization_trials=20,  # Number of Optuna trials
+        rpn_anchor_sizes: Optional[Tuple[Tuple[int, ...], ...]] = None,  # Custom anchors
+        rpn_aspect_ratios: Optional[Tuple[Tuple[float, ...], ...]] = None,  # Custom ratios
+        anchor_cache_path="optimized_anchors.pt",  # Cache path for optimized anchors
     ):
         self.device = torch.device(device if torch.cuda.is_available() else "cpu")
         self.use_amp = use_amp and self.device.type == "cuda"
         self.batch_size = batch_size
+        self.data_root = data_root
 
         print("Loading datasets...")
         train_dataset_full = iSAIDDataset(
@@ -93,7 +101,29 @@ class Trainer:
         )
 
         print("Creating model...")
-        self.model = get_custom_maskrcnn(num_classes=num_classes)
+        
+        # Create model with appropriate anchor configuration
+        if optimize_anchors:
+            print("Running anchor optimization with Optuna...")
+            self.model = get_custom_maskrcnn_with_optimized_anchors(
+                num_classes=num_classes,
+                data_root=data_root,
+                n_trials=anchor_optimization_trials,
+                device=device,
+                image_size=image_size,
+                cache_path=anchor_cache_path,
+            )
+        elif rpn_anchor_sizes is not None or rpn_aspect_ratios is not None:
+            print("Using custom anchor configuration...")
+            self.model = get_custom_maskrcnn(
+                num_classes=num_classes,
+                rpn_anchor_sizes=rpn_anchor_sizes,
+                rpn_aspect_ratios=rpn_aspect_ratios,
+            )
+        else:
+            print("Using default anchor configuration...")
+            self.model = get_custom_maskrcnn(num_classes=num_classes)
+        
         self.model.to(self.device)
 
         params = [p for p in self.model.parameters() if p.requires_grad]
