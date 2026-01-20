@@ -5,12 +5,20 @@ Training loop for Mask R-CNN (memory-safe version).
 import os
 import time
 import gc
+import math
 from pathlib import Path
-from typing import Optional, Tuple, Union
+from typing import Optional, Tuple, Union, Literal
 
 import torch
 from torch.utils.data import DataLoader, Subset, Dataset
 from torch.amp import GradScaler, autocast
+from torch.optim.lr_scheduler import (
+    StepLR, 
+    CosineAnnealingWarmRestarts,
+    OneCycleLR,
+    ReduceLROnPlateau,
+    LambdaLR,
+)
 from tqdm.auto import tqdm
 
 from models.maskrcnn_model import CustomMaskRCNN, get_custom_maskrcnn, get_custom_maskrcnn_with_optimized_anchors
@@ -135,6 +143,9 @@ class Trainer:
         rpn_anchor_sizes: Optional[Tuple[Tuple[int, ...], ...]] = None,
         rpn_aspect_ratios: Optional[Tuple[Tuple[float, ...], ...]] = None,
         anchor_cache_path: str = "optimized_anchors.pt",
+        # Learning rate scheduler options
+        scheduler_type: Literal["step", "cosine", "onecycle", "plateau", "warmup_cosine"] = "onecycle",
+        warmup_epochs: int = 1,
     ):
         """
         Initialize Trainer.
@@ -157,11 +168,15 @@ class Trainer:
             rpn_anchor_sizes: Custom anchor sizes (legacy)
             rpn_aspect_ratios: Custom aspect ratios (legacy)
             anchor_cache_path: Path to cache optimized anchors (legacy)
+            scheduler_type: LR scheduler type - "step", "cosine", "onecycle", "plateau", "warmup_cosine"
+            warmup_epochs: Number of warmup epochs (for warmup_cosine scheduler)
         """
         self.device = torch.device(device if torch.cuda.is_available() else "cpu")
         self.use_amp = use_amp and self.device.type == "cuda"
         self.batch_size = batch_size
         self.lr = lr
+        self.scheduler_type = scheduler_type
+        self.warmup_epochs = warmup_epochs
 
         # Handle datasets
         if train_dataset is not None and val_dataset is not None:
@@ -241,9 +256,9 @@ class Trainer:
         params = [p for p in self.model.parameters() if p.requires_grad]
         self.optimizer = torch.optim.AdamW(params, lr=lr, weight_decay=0.01)
 
-        self.scheduler = torch.optim.lr_scheduler.StepLR(
-            self.optimizer, step_size=10, gamma=0.1
-        )
+        # Scheduler will be created in fit() when we know epochs
+        self.scheduler = None
+        self._scheduler_type = scheduler_type
 
         self.scaler = GradScaler(enabled=self.use_amp)
 
@@ -251,6 +266,256 @@ class Trainer:
         print(f"AMP enabled: {self.use_amp}")
         print(f"Train samples: {len(self.train_dataset)}")
         print(f"Val samples: {len(self.val_dataset)}")
+
+    def _create_scheduler(self, epochs: int):
+        """Create learning rate scheduler based on scheduler_type."""
+        steps_per_epoch = len(self.train_loader)
+        total_steps = epochs * steps_per_epoch
+        
+        if self._scheduler_type == "step":
+            # Classic step decay
+            self.scheduler = StepLR(
+                self.optimizer, step_size=max(1, epochs // 3), gamma=0.1
+            )
+            self._scheduler_step_per_batch = False
+            print(f"Using StepLR scheduler (step every {epochs // 3} epochs)")
+            
+        elif self._scheduler_type == "cosine":
+            # Cosine annealing with warm restarts
+            self.scheduler = CosineAnnealingWarmRestarts(
+                self.optimizer, T_0=max(1, epochs // 4), T_mult=2, eta_min=self.lr * 0.01
+            )
+            self._scheduler_step_per_batch = False
+            print(f"Using CosineAnnealingWarmRestarts scheduler")
+            
+        elif self._scheduler_type == "onecycle":
+            # OneCycleLR - typically the best for fast convergence
+            self.scheduler = OneCycleLR(
+                self.optimizer,
+                max_lr=self.lr * 10,  # Peak LR is 10x the base
+                total_steps=total_steps,
+                pct_start=0.1,  # 10% warmup
+                anneal_strategy='cos',
+                div_factor=10,  # Initial LR = max_lr / 10
+                final_div_factor=100,  # Final LR = max_lr / 1000
+            )
+            self._scheduler_step_per_batch = True
+            print(f"Using OneCycleLR scheduler (max_lr={self.lr * 10:.6f})")
+            
+        elif self._scheduler_type == "plateau":
+            # Reduce on plateau - reactive to validation loss
+            self.scheduler = ReduceLROnPlateau(
+                self.optimizer, mode='min', factor=0.5, patience=3,
+                min_lr=self.lr * 0.001, verbose=True
+            )
+            self._scheduler_step_per_batch = False
+            self._scheduler_needs_val_loss = True
+            print(f"Using ReduceLROnPlateau scheduler")
+            
+        elif self._scheduler_type == "warmup_cosine":
+            # Linear warmup + cosine decay
+            warmup_steps = self.warmup_epochs * steps_per_epoch
+            
+            def lr_lambda(current_step):
+                if current_step < warmup_steps:
+                    return float(current_step) / float(max(1, warmup_steps))
+                progress = float(current_step - warmup_steps) / float(max(1, total_steps - warmup_steps))
+                return max(0.01, 0.5 * (1.0 + math.cos(math.pi * progress)))
+            
+            self.scheduler = LambdaLR(self.optimizer, lr_lambda)
+            self._scheduler_step_per_batch = True
+            print(f"Using Warmup+Cosine scheduler (warmup={self.warmup_epochs} epochs)")
+        else:
+            raise ValueError(f"Unknown scheduler type: {self._scheduler_type}")
+
+    def find_lr(
+        self,
+        start_lr: float = 1e-7,
+        end_lr: float = 1.0,
+        num_iter: int = 100,
+        smooth_factor: float = 0.05,
+        plot: bool = True,
+    ) -> float:
+        """
+        Learning Rate Finder using the LR range test.
+        
+        Runs a few iterations with exponentially increasing LR to find the optimal range.
+        
+        Args:
+            start_lr: Starting learning rate
+            end_lr: Maximum learning rate to test
+            num_iter: Number of iterations
+            smooth_factor: Smoothing factor for loss curve
+            plot: Whether to plot the results
+            
+        Returns:
+            Suggested learning rate (point of steepest descent)
+        """
+        print("=" * 60)
+        print("Learning Rate Finder")
+        print("=" * 60)
+        
+        # Save initial state
+        initial_state = {
+            'model': {k: v.clone() for k, v in self.model.state_dict().items()},
+            'optimizer': {k: v.clone() if isinstance(v, torch.Tensor) else v 
+                         for k, v in self.optimizer.state_dict().items()},
+        }
+        
+        # Setup
+        self.model.train()
+        lr_mult = (end_lr / start_lr) ** (1 / num_iter)
+        lr = start_lr
+        
+        # Set initial LR
+        for param_group in self.optimizer.param_groups:
+            param_group['lr'] = lr
+        
+        lrs = []
+        losses = []
+        smoothed_loss = 0
+        best_loss = float('inf')
+        
+        # Create iterator
+        data_iter = iter(self.train_loader)
+        
+        pbar = tqdm(range(num_iter), desc="Finding LR")
+        for iteration in pbar:
+            # Get batch (cycle if needed)
+            try:
+                images, targets = next(data_iter)
+            except StopIteration:
+                data_iter = iter(self.train_loader)
+                images, targets = next(data_iter)
+            
+            images = [img.to(self.device) for img in images]
+            targets = [{k: v.to(self.device) if isinstance(v, torch.Tensor) else v 
+                       for k, v in t.items()} for t in targets]
+            
+            # Skip empty batches
+            if all(len(t['boxes']) == 0 for t in targets):
+                continue
+            
+            self.optimizer.zero_grad()
+            
+            try:
+                if self.use_amp:
+                    with autocast(device_type="cuda", dtype=torch.float16):
+                        loss_dict = self.model(images, targets)
+                        loss = sum(loss_dict.values())
+                    
+                    if not torch.isfinite(loss):
+                        break
+                    
+                    self.scaler.scale(loss).backward()
+                    self.scaler.step(self.optimizer)
+                    self.scaler.update()
+                else:
+                    loss_dict = self.model(images, targets)
+                    loss = sum(loss_dict.values())
+                    
+                    if not torch.isfinite(loss):
+                        break
+                    
+                    loss.backward()
+                    self.optimizer.step()
+                
+                loss_val = loss.item()
+                
+                # Smooth loss
+                if iteration == 0:
+                    smoothed_loss = loss_val
+                else:
+                    smoothed_loss = smooth_factor * loss_val + (1 - smooth_factor) * smoothed_loss
+                
+                # Stop if loss explodes
+                if smoothed_loss > 4 * best_loss and iteration > 10:
+                    print(f"\nStopping early - loss exploding at lr={lr:.2e}")
+                    break
+                
+                if smoothed_loss < best_loss:
+                    best_loss = smoothed_loss
+                
+                lrs.append(lr)
+                losses.append(smoothed_loss)
+                
+                pbar.set_postfix(lr=f"{lr:.2e}", loss=f"{smoothed_loss:.4f}")
+                
+            except RuntimeError as e:
+                print(f"\nError at lr={lr:.2e}: {e}")
+                break
+            
+            # Update LR
+            lr *= lr_mult
+            for param_group in self.optimizer.param_groups:
+                param_group['lr'] = lr
+            
+            del images, targets, loss, loss_dict
+            torch.cuda.empty_cache()
+        
+        # Restore initial state
+        self.model.load_state_dict(initial_state['model'])
+        self.optimizer.load_state_dict(initial_state['optimizer'])
+        
+        # Find suggested LR (steepest descent point)
+        if len(losses) < 10:
+            print("Not enough data points collected. Using default LR.")
+            return self.lr
+        
+        # Compute gradient of loss curve
+        losses_arr = torch.tensor(losses)
+        lrs_arr = torch.tensor(lrs)
+        
+        # Find the point with steepest negative gradient
+        gradients = (losses_arr[1:] - losses_arr[:-1]) / (torch.log10(lrs_arr[1:]) - torch.log10(lrs_arr[:-1]))
+        
+        # Find minimum gradient (steepest descent)
+        min_grad_idx = torch.argmin(gradients).item()
+        suggested_lr = lrs[min_grad_idx]
+        
+        # Use a bit lower LR for stability (1/10th of the steepest point)
+        suggested_lr = suggested_lr / 10
+        
+        print(f"\n{'=' * 60}")
+        print(f"Suggested Learning Rate: {suggested_lr:.6f}")
+        print(f"{'=' * 60}")
+        
+        if plot:
+            try:
+                import matplotlib.pyplot as plt
+                
+                fig, ax = plt.subplots(figsize=(10, 6))
+                ax.plot(lrs, losses, 'b-', linewidth=2)
+                ax.axvline(x=suggested_lr, color='r', linestyle='--', 
+                          label=f'Suggested LR: {suggested_lr:.2e}')
+                ax.axvline(x=suggested_lr * 10, color='orange', linestyle=':', 
+                          label=f'Steepest point: {suggested_lr * 10:.2e}')
+                ax.set_xscale('log')
+                ax.set_xlabel('Learning Rate (log scale)')
+                ax.set_ylabel('Loss (smoothed)')
+                ax.set_title('Learning Rate Finder')
+                ax.legend()
+                ax.grid(True, alpha=0.3)
+                plt.tight_layout()
+                plt.show()
+            except ImportError:
+                print("Matplotlib not available for plotting")
+        
+        gc.collect()
+        torch.cuda.empty_cache()
+        
+        return suggested_lr
+
+    def set_lr(self, lr: float):
+        """Set learning rate for optimizer."""
+        self.lr = lr
+        for param_group in self.optimizer.param_groups:
+            param_group['lr'] = lr
+        print(f"Learning rate set to: {lr:.6f}")
+
+    def get_lr(self) -> float:
+        """Get current learning rate."""
+        return self.optimizer.param_groups[0]['lr']
 
     def train_epoch(self, epoch):
         self.model.train()
@@ -336,10 +601,16 @@ class Trainer:
                 for k, v in loss_dict.items():
                     loss_accumulator.setdefault(k, 0.0)
                     loss_accumulator[k] += v.item()
-                # Show all losses in pbar
+                # Show all losses in pbar with current LR
                 loss_postfix = {k: f"{v.item():.4f}" for k, v in loss_dict.items()}
                 loss_postfix["total"] = f"{loss_value:.4f}"
+                loss_postfix["lr"] = f"{self.get_lr():.2e}"
                 pbar.set_postfix(loss=loss_postfix)
+                
+                # Step scheduler per batch if needed (OneCycleLR, warmup_cosine)
+                if self.scheduler is not None and getattr(self, '_scheduler_step_per_batch', False):
+                    self.scheduler.step()
+                    
             except RuntimeError as e:
                 print(f"Warning: RuntimeError in batch: {e}, skipping")
                 self.optimizer.zero_grad(set_to_none=True)
@@ -349,7 +620,11 @@ class Trainer:
             del images, targets, loss, loss_dict
             torch.cuda.empty_cache()
 
-        self.scheduler.step()
+        # Step scheduler per epoch if needed (StepLR, Cosine)
+        if self.scheduler is not None and not getattr(self, '_scheduler_step_per_batch', False):
+            if not getattr(self, '_scheduler_needs_val_loss', False):
+                self.scheduler.step()
+        
         # Return average losses
         avg_losses = {
             k: v / len(self.train_loader) for k, v in loss_accumulator.items()
@@ -423,12 +698,28 @@ class Trainer:
         print(f"  Val Loss: {checkpoint.get('val_loss', 'N/A'):.4f}")
         return checkpoint
 
-    def fit(self, epochs=20, save_dir="checkpoints"):
+    def fit(self, epochs=20, save_dir="checkpoints", find_lr_first=False):
+        """
+        Train the model.
+        
+        Args:
+            epochs: Number of epochs to train
+            save_dir: Directory to save checkpoints
+            find_lr_first: If True, run LR finder before training
+        """
+        # Optionally find best LR
+        if find_lr_first:
+            suggested_lr = self.find_lr()
+            self.set_lr(suggested_lr)
+        
+        # Create scheduler now that we know epochs
+        self._create_scheduler(epochs)
+        
         best_loss = float("inf")
 
         for epoch in range(1, epochs + 1):
             print(f"\n{'=' * 50}")
-            print(f"Epoch {epoch}/{epochs}")
+            print(f"Epoch {epoch}/{epochs} | LR: {self.get_lr():.2e}")
             print(f"{'=' * 50}")
 
             start = time.time()
@@ -446,6 +737,11 @@ class Trainer:
                 print(f"    {k}: {v:.4f}")
 
             val_loss = val_losses["total"]
+            
+            # Step plateau scheduler with validation loss
+            if self.scheduler is not None and getattr(self, '_scheduler_needs_val_loss', False):
+                self.scheduler.step(val_loss)
+            
             self.save_checkpoint(f"{save_dir}/last.pth", epoch, val_loss)
 
             if val_loss < best_loss:
