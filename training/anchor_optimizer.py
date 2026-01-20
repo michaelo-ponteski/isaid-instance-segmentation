@@ -347,7 +347,7 @@ class AnchorOptimizer:
             trial: Optuna trial object
             
         Returns:
-            Negative recall (for minimization)
+            Recall score (for maximization)
         """
         # Sample anchor sizes for each FPN level
         anchor_sizes = []
@@ -427,12 +427,15 @@ class AnchorOptimizer:
             
             print(f"  Recalls: {recalls}, Score: {score:.4f}")
             
+            # Store the actual anchor sizes used (after correction) as user attributes
+            trial.set_user_attr("actual_anchor_sizes", anchor_sizes)
+            
             # Cleanup
             del model, train_loader, val_loader
             gc.collect()
             torch.cuda.empty_cache()
             
-            return -score  # Negative because Optuna minimizes
+            return score  # Return positive score (Optuna maximizes)
             
         except Exception as e:
             print(f"  Trial failed: {e}")
@@ -465,12 +468,12 @@ class AnchorOptimizer:
         print(f"Running {n_trials} trials...")
         print("=" * 60)
         
-        # Create or load study
+        # Create or load study (maximize recall)
         study = optuna.create_study(
             study_name=study_name,
             storage=storage,
             load_if_exists=True,
-            direction="minimize",
+            direction="maximize",
             sampler=optuna.samplers.TPESampler(seed=42),
             pruner=optuna.pruners.MedianPruner()
         )
@@ -489,15 +492,23 @@ class AnchorOptimizer:
         print("Optimization Complete!")
         print("=" * 60)
         print(f"Best trial: {best_trial.number}")
-        print(f"Best score: {-best_trial.value:.4f}")
+        print(f"Best score (recall): {best_trial.value:.4f}")
         print(f"Best params: {best_trial.params}")
         
         # Reconstruct best anchor config
-        anchor_sizes = []
-        for level in range(self.num_fpn_levels):
-            size_small = best_trial.params[f"size_l{level}_small"]
-            size_large = best_trial.params[f"size_l{level}_large"]
-            anchor_sizes.append((size_small, size_large))
+        # Use stored actual anchor sizes if available, otherwise reconstruct with correction
+        if "actual_anchor_sizes" in best_trial.user_attrs:
+            anchor_sizes = best_trial.user_attrs["actual_anchor_sizes"]
+        else:
+            # Reconstruct with the same correction logic used during optimization
+            anchor_sizes = []
+            for level in range(self.num_fpn_levels):
+                size_small = best_trial.params[f"size_l{level}_small"]
+                size_large = best_trial.params[f"size_l{level}_large"]
+                # Apply the same correction as in objective()
+                if size_large <= size_small:
+                    size_large = size_small + 8
+                anchor_sizes.append((size_small, size_large))
         
         if best_trial.params.get("optimize_ratios", False):
             aspect_ratios = ((
