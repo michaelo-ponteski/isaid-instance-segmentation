@@ -417,7 +417,7 @@ class AnchorOptimizer:
             )
             
             # Quick training
-            self._quick_train(model, train_loader, num_iterations=50)
+            self._quick_train(model, train_loader, num_iterations=300)
             
             # Evaluate RPN recall
             recalls = self._compute_rpn_recall(model, val_loader, max_batches=30)
