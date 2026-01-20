@@ -25,7 +25,7 @@ from models.roi_heads import (
 class CustomMaskRCNN(nn.Module):
     """
     Custom Mask R-CNN with:
-    - EfficientNet backbone with CBAM attention
+    - EfficientNet backbone with CBAM attention (default) or custom backbone
     - Custom FPN with attention modules
     - Enhanced RoI heads with additional layers
 
@@ -35,6 +35,9 @@ class CustomMaskRCNN(nn.Module):
         self,
         num_classes,
         pretrained_backbone=True,
+        # Custom backbone support
+        backbone_with_fpn=None,  # Optional: pass a pre-built BackboneWithFPN
+        fpn_out_channels=256,    # FPN output channels (must match backbone if provided)
         # RPN parameters - smaller anchors for satellite imagery (small vehicles etc)
         rpn_anchor_sizes=((16, 24), (32, 48), (64, 96), (128, 192)),
         rpn_aspect_ratios=((0.5, 1.0, 2.0),) * 4,
@@ -52,11 +55,15 @@ class CustomMaskRCNN(nn.Module):
 
         self.num_classes = num_classes
 
-        # Backbone with FPN
-        backbone, fpn, fpn_out_channels = build_custom_backbone_with_fpn(
-            pretrained=pretrained_backbone
-        )
-        self.backbone = BackboneWithFPN(backbone, fpn)
+        # Backbone with FPN - use provided or build default
+        if backbone_with_fpn is not None:
+            self.backbone = backbone_with_fpn
+            fpn_out_channels = backbone_with_fpn.out_channels
+        else:
+            backbone, fpn, fpn_out_channels = build_custom_backbone_with_fpn(
+                pretrained=pretrained_backbone
+            )
+            self.backbone = BackboneWithFPN(backbone, fpn)
 
         # RPN
         anchor_generator = AnchorGenerator(

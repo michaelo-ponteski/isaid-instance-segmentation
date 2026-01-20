@@ -6,14 +6,14 @@ import os
 import time
 import gc
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Union
 
 import torch
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader, Subset, Dataset
 from torch.amp import GradScaler, autocast
 from tqdm.auto import tqdm
 
-from models.maskrcnn_model import get_custom_maskrcnn, get_custom_maskrcnn_with_optimized_anchors
+from models.maskrcnn_model import CustomMaskRCNN, get_custom_maskrcnn, get_custom_maskrcnn_with_optimized_anchors
 from datasets.isaid_dataset import iSAIDDataset
 from training.transforms import get_transforms
 
@@ -24,63 +24,165 @@ def collate_fn(batch):
     return tuple(zip(*batch))
 
 
+def create_datasets(
+    data_root: str,
+    image_size: int = 800,
+    subset_fraction: float = 1.0,
+) -> Tuple[Dataset, Dataset]:
+    """
+    Create train and validation datasets.
+    
+    This is a helper function to create datasets once and reuse them
+    across multiple training runs with different models/backbones.
+    
+    Args:
+        data_root: Path to the dataset root directory
+        image_size: Image size for resizing
+        subset_fraction: Fraction of data to use (0.0 to 1.0)
+        
+    Returns:
+        Tuple of (train_dataset, val_dataset)
+    """
+    print("Loading datasets...")
+    train_dataset_full = iSAIDDataset(
+        data_root,
+        split="train",
+        transforms=get_transforms(train=True),
+        image_size=image_size,
+    )
+    val_dataset_full = iSAIDDataset(
+        data_root,
+        split="val",
+        transforms=get_transforms(train=False),
+        image_size=image_size,
+    )
+
+    # Apply subset if needed
+    if subset_fraction < 1.0:
+        train_size = int(len(train_dataset_full) * subset_fraction)
+        val_size = int(len(val_dataset_full) * subset_fraction)
+        train_size = max(1, train_size)
+        val_size = max(1, val_size)
+
+        train_dataset = Subset(train_dataset_full, range(train_size))
+        val_dataset = Subset(val_dataset_full, range(val_size))
+        print(
+            f"Using {subset_fraction*100:.1f}% of data: {train_size} train, {val_size} val samples"
+        )
+    else:
+        train_dataset = train_dataset_full
+        val_dataset = val_dataset_full
+        print(
+            f"Using full dataset: {len(train_dataset_full)} train, {len(val_dataset_full)} val samples"
+        )
+    
+    return train_dataset, val_dataset
+
+
 class Trainer:
+    """
+    Trainer class for Mask R-CNN models.
+    
+    Can be initialized in two ways:
+    1. With pre-created datasets and model (recommended for multiple runs)
+    2. With data_root to create datasets internally (legacy mode)
+    
+    Example usage with external datasets and model:
+        # Create datasets once
+        train_ds, val_ds = create_datasets("iSAID_patches", image_size=800)
+        
+        # Create model with custom backbone
+        model = CustomMaskRCNN(num_classes=16, backbone_with_fpn=my_backbone)
+        
+        # Train
+        trainer = Trainer(
+            train_dataset=train_ds,
+            val_dataset=val_ds,
+            model=model,
+        )
+        trainer.train(epochs=20)
+        
+        # Train another model with same datasets
+        model2 = CustomMaskRCNN(num_classes=16, backbone_with_fpn=other_backbone)
+        trainer2 = Trainer(
+            train_dataset=train_ds,
+            val_dataset=val_ds,
+            model=model2,
+        )
+    """
+    
     def __init__(
         self,
-        data_root,
-        num_classes=16,
-        batch_size=2,
-        lr=0.0001,  # Reduced from 0.005 to prevent NaN loss
-        device="cuda",
-        use_amp=True,
-        image_size=800,  # reduced to lower VRAM
-        num_workers=2,
-        subset_fraction=1.0,  # Fraction of data to use (0.0 to 1.0)
-        # Anchor optimization parameters
-        optimize_anchors=False,  # Enable Optuna anchor optimization
-        anchor_optimization_trials=20,  # Number of Optuna trials
-        rpn_anchor_sizes: Optional[Tuple[Tuple[int, ...], ...]] = None,  # Custom anchors
-        rpn_aspect_ratios: Optional[Tuple[Tuple[float, ...], ...]] = None,  # Custom ratios
-        anchor_cache_path="optimized_anchors.pt",  # Cache path for optimized anchors
+        # New interface: pass datasets and model directly
+        train_dataset: Optional[Dataset] = None,
+        val_dataset: Optional[Dataset] = None,
+        model: Optional[CustomMaskRCNN] = None,
+        # Legacy interface: create datasets from data_root
+        data_root: Optional[str] = None,
+        num_classes: int = 16,
+        # Training parameters
+        batch_size: int = 2,
+        lr: float = 0.0001,
+        device: str = "cuda",
+        use_amp: bool = True,
+        num_workers: int = 2,
+        # Legacy dataset creation parameters
+        image_size: int = 800,
+        subset_fraction: float = 1.0,
+        # Legacy anchor optimization parameters
+        optimize_anchors: bool = False,
+        anchor_optimization_trials: int = 20,
+        rpn_anchor_sizes: Optional[Tuple[Tuple[int, ...], ...]] = None,
+        rpn_aspect_ratios: Optional[Tuple[Tuple[float, ...], ...]] = None,
+        anchor_cache_path: str = "optimized_anchors.pt",
     ):
+        """
+        Initialize Trainer.
+        
+        Args:
+            train_dataset: Pre-created training dataset (recommended)
+            val_dataset: Pre-created validation dataset (recommended)
+            model: Pre-created CustomMaskRCNN model (recommended)
+            data_root: Path to dataset (legacy mode - creates datasets internally)
+            num_classes: Number of classes (used only if model is None)
+            batch_size: Training batch size
+            lr: Learning rate
+            device: Device to train on ('cuda' or 'cpu')
+            use_amp: Whether to use automatic mixed precision
+            num_workers: Number of data loading workers
+            image_size: Image size (used only if datasets are None)
+            subset_fraction: Fraction of data to use (used only if datasets are None)
+            optimize_anchors: Whether to run anchor optimization (legacy)
+            anchor_optimization_trials: Number of Optuna trials (legacy)
+            rpn_anchor_sizes: Custom anchor sizes (legacy)
+            rpn_aspect_ratios: Custom aspect ratios (legacy)
+            anchor_cache_path: Path to cache optimized anchors (legacy)
+        """
         self.device = torch.device(device if torch.cuda.is_available() else "cpu")
         self.use_amp = use_amp and self.device.type == "cuda"
         self.batch_size = batch_size
-        self.data_root = data_root
+        self.lr = lr
 
-        print("Loading datasets...")
-        train_dataset_full = iSAIDDataset(
-            data_root,
-            split="train",
-            transforms=get_transforms(train=True),
-            image_size=image_size,
-        )
-        val_dataset_full = iSAIDDataset(
-            data_root,
-            split="val",
-            transforms=get_transforms(train=False),
-            image_size=image_size,
-        )
-
-        # Apply subset if needed
-        if subset_fraction < 1.0:
-            train_size = int(len(train_dataset_full) * subset_fraction)
-            val_size = int(len(val_dataset_full) * subset_fraction)
-            train_size = max(1, train_size)  # At least 1 sample
-            val_size = max(1, val_size)
-
-            self.train_dataset = Subset(train_dataset_full, range(train_size))
-            self.val_dataset = Subset(val_dataset_full, range(val_size))
-            print(
-                f"Using {subset_fraction*100:.1f}% of data: {train_size} train, {val_size} val samples"
+        # Handle datasets
+        if train_dataset is not None and val_dataset is not None:
+            # Use provided datasets
+            self.train_dataset = train_dataset
+            self.val_dataset = val_dataset
+            print(f"Using provided datasets: {len(train_dataset)} train, {len(val_dataset)} val samples")
+        elif data_root is not None:
+            # Legacy mode: create datasets from data_root
+            self.train_dataset, self.val_dataset = create_datasets(
+                data_root=data_root,
+                image_size=image_size,
+                subset_fraction=subset_fraction,
             )
+            self.data_root = data_root
         else:
-            self.train_dataset = train_dataset_full
-            self.val_dataset = val_dataset_full
-            print(
-                f"Using full dataset: {len(train_dataset_full)} train, {len(val_dataset_full)} val samples"
+            raise ValueError(
+                "Either provide (train_dataset, val_dataset) or data_root"
             )
 
+        # Create data loaders
         self.train_loader = DataLoader(
             self.train_dataset,
             batch_size=batch_size,
@@ -100,32 +202,42 @@ class Trainer:
             pin_memory=True,
         )
 
-        print("Creating model...")
-        
-        # Create model with appropriate anchor configuration
-        if optimize_anchors:
-            print("Running anchor optimization with Optuna...")
-            self.model = get_custom_maskrcnn_with_optimized_anchors(
-                num_classes=num_classes,
-                data_root=data_root,
-                n_trials=anchor_optimization_trials,
-                device=device,
-                image_size=image_size,
-                cache_path=anchor_cache_path,
-            )
-        elif rpn_anchor_sizes is not None or rpn_aspect_ratios is not None:
-            print("Using custom anchor configuration...")
-            self.model = get_custom_maskrcnn(
-                num_classes=num_classes,
-                rpn_anchor_sizes=rpn_anchor_sizes,
-                rpn_aspect_ratios=rpn_aspect_ratios,
-            )
+        # Handle model
+        if model is not None:
+            # Use provided model
+            print("Using provided model")
+            self.model = model
+        elif data_root is not None:
+            # Legacy mode: create model
+            print("Creating model...")
+            if optimize_anchors:
+                print("Running anchor optimization with Optuna...")
+                self.model = get_custom_maskrcnn_with_optimized_anchors(
+                    num_classes=num_classes,
+                    data_root=data_root,
+                    n_trials=anchor_optimization_trials,
+                    device=device,
+                    image_size=image_size,
+                    cache_path=anchor_cache_path,
+                )
+            elif rpn_anchor_sizes is not None or rpn_aspect_ratios is not None:
+                print("Using custom anchor configuration...")
+                self.model = get_custom_maskrcnn(
+                    num_classes=num_classes,
+                    rpn_anchor_sizes=rpn_anchor_sizes,
+                    rpn_aspect_ratios=rpn_aspect_ratios,
+                )
+            else:
+                print("Using default anchor configuration...")
+                self.model = get_custom_maskrcnn(num_classes=num_classes)
         else:
-            print("Using default anchor configuration...")
-            self.model = get_custom_maskrcnn(num_classes=num_classes)
+            raise ValueError(
+                "Either provide a model or data_root to create one"
+            )
         
         self.model.to(self.device)
 
+        # Setup optimizer and scheduler
         params = [p for p in self.model.parameters() if p.requires_grad]
         self.optimizer = torch.optim.AdamW(params, lr=lr, weight_decay=0.01)
 

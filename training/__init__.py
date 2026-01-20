@@ -1,4 +1,4 @@
-from .trainer import Trainer, train
+from .trainer import Trainer, train, create_datasets
 from .transforms import get_transforms
 from .anchor_optimizer import (
     AnchorConfig,
@@ -11,6 +11,7 @@ from .anchor_optimizer import (
 __all__ = [
     "Trainer",
     "train",
+    "create_datasets",
     "get_transforms",
     "AnchorConfig",
     "AnchorOptimizer",
