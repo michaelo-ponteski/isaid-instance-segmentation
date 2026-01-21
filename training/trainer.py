@@ -1050,7 +1050,9 @@ class Trainer:
         return history
 
     @torch.no_grad()
-    def visualize_predictions(self, num_samples=5, score_threshold=0.5, save_path=None, mask_alpha=0.4):
+    def visualize_predictions(
+        self, num_samples=5, score_threshold=0.5, save_path=None, mask_alpha=0.4
+    ):
         """Visualize model predictions on validation set with masks.
 
         Args:
@@ -1067,9 +1069,22 @@ class Trainer:
 
         # Colors for different instances (distinct colors)
         COLORS = [
-            [1, 0, 0], [0, 1, 0], [0, 0, 1], [1, 1, 0], [1, 0, 1], [0, 1, 1],
-            [0.5, 0, 0], [0, 0.5, 0], [0, 0, 0.5], [0.5, 0.5, 0], [0.5, 0, 0.5],
-            [0, 0.5, 0.5], [1, 0.5, 0], [1, 0, 0.5], [0.5, 1, 0], [0, 1, 0.5],
+            [1, 0, 0],
+            [0, 1, 0],
+            [0, 0, 1],
+            [1, 1, 0],
+            [1, 0, 1],
+            [0, 1, 1],
+            [0.5, 0, 0],
+            [0, 0.5, 0],
+            [0, 0, 0.5],
+            [0.5, 0.5, 0],
+            [0.5, 0, 0.5],
+            [0, 0.5, 0.5],
+            [1, 0.5, 0],
+            [1, 0, 0.5],
+            [0.5, 1, 0],
+            [0, 1, 0.5],
         ]
 
         # Get category names if available
@@ -1128,7 +1143,11 @@ class Trainer:
             pred_boxes = predictions["boxes"][keep_idx].cpu().numpy()
             pred_labels = predictions["labels"][keep_idx].cpu().numpy()
             pred_scores = predictions["scores"][keep_idx].cpu().numpy()
-            pred_masks = predictions["masks"][keep_idx].cpu().numpy() if "masks" in predictions else None
+            pred_masks = (
+                predictions["masks"][keep_idx].cpu().numpy()
+                if "masks" in predictions
+                else None
+            )
 
             # Ground truth visualization with masks
             ax_gt = axes[idx, 0]
@@ -1145,7 +1164,8 @@ class Trainer:
                         mask = mask[0]
                     mask_bool = mask > 0.5
                     img_gt_overlay[mask_bool] = (
-                        img_gt_overlay[mask_bool] * (1 - mask_alpha) + color * mask_alpha
+                        img_gt_overlay[mask_bool] * (1 - mask_alpha)
+                        + color * mask_alpha
                     )
 
             ax_gt.imshow(img_gt_overlay)
@@ -1182,17 +1202,44 @@ class Trainer:
             # Predictions visualization with masks
             ax_pred = axes[idx, 1]
             img_pred_overlay = img_display.copy()
+            img_h, img_w = img_pred_overlay.shape[:2]
 
             # Overlay predicted masks
             if pred_masks is not None and len(pred_masks) > 0:
-                for i, (mask, label) in enumerate(zip(pred_masks, pred_labels)):
+                from scipy.ndimage import zoom
+                
+                for i, (mask, box, label) in enumerate(zip(pred_masks, pred_boxes, pred_labels)):
                     color = np.array(COLORS[int(label) % len(COLORS)])
                     # Predicted masks are (1, H, W) with probabilities
                     if mask.ndim == 3:
                         mask = mask[0]
+                    
+                    # Check if mask needs to be resized (raw 28x28 mask head output)
+                    mask_h, mask_w = mask.shape
+                    if mask_h != img_h or mask_w != img_w:
+                        # Resize mask to bounding box size and paste onto full image
+                        x1, y1, x2, y2 = map(int, box)
+                        x1, y1 = max(0, x1), max(0, y1)
+                        x2, y2 = min(img_w, x2), min(img_h, y2)
+                        box_h, box_w = y2 - y1, x2 - x1
+                        
+                        if box_h > 0 and box_w > 0:
+                            # Resize mask to box dimensions
+                            scale_h, scale_w = box_h / mask_h, box_w / mask_w
+                            resized_mask = zoom(mask, (scale_h, scale_w), order=1)
+                            
+                            # Create full-size mask and paste
+                            full_mask = np.zeros((img_h, img_w), dtype=np.float32)
+                            # Handle potential size mismatches due to rounding
+                            paste_h = min(resized_mask.shape[0], img_h - y1)
+                            paste_w = min(resized_mask.shape[1], img_w - x1)
+                            full_mask[y1:y1+paste_h, x1:x1+paste_w] = resized_mask[:paste_h, :paste_w]
+                            mask = full_mask
+                    
                     mask_bool = mask > 0.5
                     img_pred_overlay[mask_bool] = (
-                        img_pred_overlay[mask_bool] * (1 - mask_alpha) + color * mask_alpha
+                        img_pred_overlay[mask_bool] * (1 - mask_alpha)
+                        + color * mask_alpha
                     )
 
             ax_pred.imshow(img_pred_overlay)
@@ -1201,7 +1248,9 @@ class Trainer:
             )
             ax_pred.axis("off")
 
-            for i, (box, label, score) in enumerate(zip(pred_boxes, pred_labels, pred_scores)):
+            for i, (box, label, score) in enumerate(
+                zip(pred_boxes, pred_labels, pred_scores)
+            ):
                 x1, y1, x2, y2 = box
                 color = COLORS[int(label) % len(COLORS)]
                 rect = patches.Rectangle(
