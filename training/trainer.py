@@ -564,27 +564,31 @@ class Trainer:
         dataloader: DataLoader,
         iou_threshold: float = 0.5,
         score_threshold: float = 0.5,
-        max_samples: int = None,
+        max_samples: int = 200,
         max_dets_per_image: int = 100,
+        max_preds_per_class: int = 2000,
     ) -> Tuple[float, float]:
         """
-        Compute mAP@IoU and mean IoU on a dataset (fast GPU version).
+        Compute mAP@IoU and mean IoU on a dataset (memory-efficient version).
 
         Args:
             dataloader: DataLoader to evaluate on
             iou_threshold: IoU threshold for mAP computation
             score_threshold: Minimum score for predictions
-            max_samples: Maximum samples to evaluate (None = all)
-            max_dets_per_image: Max detections per image (limits memory)
+            max_samples: Maximum samples to evaluate (default 200 for speed)
+            max_dets_per_image: Max detections per image
+            max_preds_per_class: Max predictions to keep per class (prunes low scores)
 
         Returns:
             Tuple of (mAP@IoU, mean_IoU)
         """
         self.model.eval()
 
-        # Collect predictions and ground truths per class (store as lists of numpy arrays)
+        # Collect predictions and ground truths per class
+        # Store as single arrays that we extend, not lists of arrays
         class_data: Dict[int, Dict[str, List]] = {}
-        all_ious = []
+        iou_sum = 0.0
+        iou_count = 0
 
         num_samples = 0
         for images, targets in dataloader:
@@ -592,74 +596,90 @@ class Trainer:
                 break
 
             images = [img.to(self.device) for img in images]
-
-            # Fast inference on GPU
             predictions = self.model(images)
 
             for pred, target in zip(predictions, targets):
-                # Filter by score and limit detections (on GPU for speed)
+                # Filter by score and limit detections
                 scores = pred["scores"]
                 keep = scores >= score_threshold
                 if keep.sum() > max_dets_per_image:
-                    # Keep top-k by score
                     _, top_idx = scores.topk(max_dets_per_image)
-                    keep = torch.zeros_like(keep)
+                    keep = torch.zeros_like(keep, dtype=torch.bool)
                     keep[top_idx] = True
 
-                # Extract and move to CPU only what we need (as numpy for storage efficiency)
-                pred_boxes = pred["boxes"][keep].cpu().numpy()
+                # Move to CPU as numpy
+                pred_boxes = pred["boxes"][keep].cpu().numpy().astype(np.float32)
                 pred_labels = pred["labels"][keep].cpu().numpy()
-                pred_scores = pred["scores"][keep].cpu().numpy()
+                pred_scores = pred["scores"][keep].cpu().numpy().astype(np.float32)
 
-                gt_boxes = target["boxes"].cpu().numpy()
+                gt_boxes = target["boxes"].cpu().numpy().astype(np.float32)
                 gt_labels = target["labels"].cpu().numpy()
 
-                # Compute mean IoU for this image
+                # Compute mean IoU incrementally (avoid storing all IoUs)
                 if len(pred_boxes) > 0 and len(gt_boxes) > 0:
-                    # Quick IoU on numpy
                     ious = self._compute_iou_numpy(pred_boxes, gt_boxes)
                     best_ious = ious.max(axis=0)
-                    all_ious.extend(best_ious.tolist())
+                    iou_sum += best_ious.sum()
+                    iou_count += len(best_ious)
+                    del ious, best_ious
 
                 # Collect per-class data
                 all_labels = set(pred_labels.tolist()) | set(gt_labels.tolist())
                 for label_id in all_labels:
                     if label_id not in class_data:
                         class_data[label_id] = {
-                            "pred_boxes": [], "pred_scores": [], "gt_boxes": []
+                            "pred_boxes": [], "pred_scores": [], "gt_boxes": [],
+                            "n_preds": 0, "n_gts": 0
                         }
 
                     pred_mask = pred_labels == label_id
                     if pred_mask.any():
-                        class_data[label_id]["pred_boxes"].append(pred_boxes[pred_mask])
-                        class_data[label_id]["pred_scores"].append(pred_scores[pred_mask])
+                        boxes = pred_boxes[pred_mask]
+                        scores_cls = pred_scores[pred_mask]
+                        
+                        # Only add if under limit, or if scores are high enough
+                        data = class_data[label_id]
+                        if data["n_preds"] < max_preds_per_class:
+                            data["pred_boxes"].append(boxes)
+                            data["pred_scores"].append(scores_cls)
+                            data["n_preds"] += len(boxes)
 
                     gt_mask = gt_labels == label_id
                     if gt_mask.any():
                         class_data[label_id]["gt_boxes"].append(gt_boxes[gt_mask])
+                        class_data[label_id]["n_gts"] += gt_mask.sum()
 
             num_samples += len(images)
+            
+            # Clear references
+            del images, predictions
 
-        # Compute AP per class
+        # Compute AP per class (one at a time to limit memory)
         aps = []
-        for label_id, data in class_data.items():
+        for label_id in list(class_data.keys()):
+            data = class_data[label_id]
+            
             if data["pred_boxes"]:
                 all_pred_boxes = np.concatenate(data["pred_boxes"])
                 all_pred_scores = np.concatenate(data["pred_scores"])
             else:
-                all_pred_boxes = np.zeros((0, 4))
-                all_pred_scores = np.zeros(0)
+                all_pred_boxes = np.zeros((0, 4), dtype=np.float32)
+                all_pred_scores = np.zeros(0, dtype=np.float32)
 
             if data["gt_boxes"]:
                 all_gt_boxes = np.concatenate(data["gt_boxes"])
             else:
-                all_gt_boxes = np.zeros((0, 4))
+                all_gt_boxes = np.zeros((0, 4), dtype=np.float32)
 
             ap = self._compute_ap_numpy(all_pred_boxes, all_pred_scores, all_gt_boxes, iou_threshold)
             aps.append(ap)
 
+            # Free memory immediately after each class
+            del all_pred_boxes, all_pred_scores, all_gt_boxes
+            del class_data[label_id]
+
         mAP = sum(aps) / len(aps) if aps else 0.0
-        mean_iou = sum(all_ious) / len(all_ious) if all_ious else 0.0
+        mean_iou = iou_sum / iou_count if iou_count > 0 else 0.0
 
         self.model.train()
         return mAP, mean_iou
@@ -1012,13 +1032,13 @@ class Trainer:
                 val_map, val_mean_iou = self.compute_map(
                     self.val_loader,
                     iou_threshold=0.5,
-                    max_samples=max_map_samples,
+                    max_samples=max_map_samples if max_map_samples else 200,
                 )
                 # Training mAP (for overfitting diagnosis)
                 train_map, _ = self.compute_map(
                     self.train_loader,
                     iou_threshold=0.5,
-                    max_samples=max_map_samples,
+                    max_samples=max_map_samples if max_map_samples else 200,
                 )
                 # mAP gap: positive = overfitting, negative = underfitting
                 map_gap = train_map - val_map
