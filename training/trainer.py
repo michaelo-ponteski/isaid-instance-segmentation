@@ -6,6 +6,7 @@ import os
 import time
 import gc
 import math
+import numpy as np
 from pathlib import Path
 from typing import Optional, Tuple, Union, Dict, List
 
@@ -564,147 +565,166 @@ class Trainer:
         iou_threshold: float = 0.5,
         score_threshold: float = 0.5,
         max_samples: int = None,
+        max_dets_per_image: int = 100,
     ) -> Tuple[float, float]:
         """
-        Compute mAP@IoU and mean IoU on a dataset (memory-efficient version).
+        Compute mAP@IoU and mean IoU on a dataset (fast GPU version).
 
         Args:
             dataloader: DataLoader to evaluate on
             iou_threshold: IoU threshold for mAP computation
             score_threshold: Minimum score for predictions
             max_samples: Maximum samples to evaluate (None = all)
+            max_dets_per_image: Max detections per image (limits memory)
 
         Returns:
             Tuple of (mAP@IoU, mean_IoU)
         """
         self.model.eval()
 
-        # Collect predictions and ground truths per class
-        # Structure: {class_id: {'pred_boxes': [], 'pred_scores': [], 'gt_boxes': []}}
+        # Collect predictions and ground truths per class (store as lists of numpy arrays)
         class_data: Dict[int, Dict[str, List]] = {}
-        all_ious = []  # For mean IoU computation
+        all_ious = []
 
         num_samples = 0
-        for batch_idx, (images, targets) in enumerate(dataloader):
+        for images, targets in dataloader:
             if max_samples and num_samples >= max_samples:
                 break
 
             images = [img.to(self.device) for img in images]
 
-            # Get predictions
-            with (
-                autocast(device_type="cuda", dtype=torch.float16)
-                if self.use_amp
-                else torch.no_grad()
-            ):
-                predictions = self.model(images)
-
-            # Move predictions to CPU immediately to free GPU memory
-            predictions = [{k: v.detach().cpu() for k, v in pred.items()} for pred in predictions]
-            
-            # Clear GPU cache after inference
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+            # Fast inference on GPU
+            predictions = self.model(images)
 
             for pred, target in zip(predictions, targets):
-                # Filter predictions by score
-                keep = pred["scores"] >= score_threshold
-                pred_boxes = pred["boxes"][keep]
-                pred_labels = pred["labels"][keep]
-                pred_scores = pred["scores"][keep]
+                # Filter by score and limit detections (on GPU for speed)
+                scores = pred["scores"]
+                keep = scores >= score_threshold
+                if keep.sum() > max_dets_per_image:
+                    # Keep top-k by score
+                    _, top_idx = scores.topk(max_dets_per_image)
+                    keep = torch.zeros_like(keep)
+                    keep[top_idx] = True
 
-                gt_boxes = target["boxes"]
-                gt_labels = target["labels"]
+                # Extract and move to CPU only what we need (as numpy for storage efficiency)
+                pred_boxes = pred["boxes"][keep].cpu().numpy()
+                pred_labels = pred["labels"][keep].cpu().numpy()
+                pred_scores = pred["scores"][keep].cpu().numpy()
 
-                # Compute mean IoU for this image (best matching IoU per GT box)
+                gt_boxes = target["boxes"].cpu().numpy()
+                gt_labels = target["labels"].cpu().numpy()
+
+                # Compute mean IoU for this image
                 if len(pred_boxes) > 0 and len(gt_boxes) > 0:
-                    ious = compute_iou(pred_boxes, gt_boxes)
-                    # For each GT box, find best matching prediction
-                    best_ious, _ = ious.max(dim=0)
+                    # Quick IoU on numpy
+                    ious = self._compute_iou_numpy(pred_boxes, gt_boxes)
+                    best_ious = ious.max(axis=0)
                     all_ious.extend(best_ious.tolist())
-                    del ious, best_ious  # Free memory immediately
 
-                # Collect per-class data for mAP
-                unique_labels = torch.unique(
-                    torch.cat([pred_labels, gt_labels])
-                    if len(pred_labels) > 0
-                    else gt_labels
-                )
-
-                for label in unique_labels:
-                    label_id = label.item()
+                # Collect per-class data
+                all_labels = set(pred_labels.tolist()) | set(gt_labels.tolist())
+                for label_id in all_labels:
                     if label_id not in class_data:
                         class_data[label_id] = {
-                            "pred_boxes": [],
-                            "pred_scores": [],
-                            "gt_boxes": [],
+                            "pred_boxes": [], "pred_scores": [], "gt_boxes": []
                         }
 
-                    # Predictions for this class
-                    pred_mask = pred_labels == label
+                    pred_mask = pred_labels == label_id
                     if pred_mask.any():
-                        class_data[label_id]["pred_boxes"].append(pred_boxes[pred_mask].clone())
-                        class_data[label_id]["pred_scores"].append(pred_scores[pred_mask].clone())
+                        class_data[label_id]["pred_boxes"].append(pred_boxes[pred_mask])
+                        class_data[label_id]["pred_scores"].append(pred_scores[pred_mask])
 
-                    # Ground truths for this class
-                    gt_mask = gt_labels == label
+                    gt_mask = gt_labels == label_id
                     if gt_mask.any():
-                        class_data[label_id]["gt_boxes"].append(gt_boxes[gt_mask].clone())
-                
-                # Clean up after each image
-                del pred_boxes, pred_labels, pred_scores, gt_boxes, gt_labels, pred, target
+                        class_data[label_id]["gt_boxes"].append(gt_boxes[gt_mask])
 
             num_samples += len(images)
-            
-            # Periodic garbage collection every 10 batches
-            if batch_idx % 10 == 0:
-                gc.collect()
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
 
-        # Compute AP per class (process one class at a time to reduce peak memory)
+        # Compute AP per class
         aps = []
         for label_id, data in class_data.items():
-            # Concatenate all predictions and GTs for this class
             if data["pred_boxes"]:
-                all_pred_boxes = torch.cat(data["pred_boxes"])
-                all_pred_scores = torch.cat(data["pred_scores"])
+                all_pred_boxes = np.concatenate(data["pred_boxes"])
+                all_pred_scores = np.concatenate(data["pred_scores"])
             else:
-                all_pred_boxes = torch.zeros((0, 4))
-                all_pred_scores = torch.zeros(0)
+                all_pred_boxes = np.zeros((0, 4))
+                all_pred_scores = np.zeros(0)
 
             if data["gt_boxes"]:
-                all_gt_boxes = torch.cat(data["gt_boxes"])
+                all_gt_boxes = np.concatenate(data["gt_boxes"])
             else:
-                all_gt_boxes = torch.zeros((0, 4))
+                all_gt_boxes = np.zeros((0, 4))
 
-            ap = compute_ap_single_class(
-                all_pred_boxes, all_pred_scores, all_gt_boxes, iou_threshold
-            )
+            ap = self._compute_ap_numpy(all_pred_boxes, all_pred_scores, all_gt_boxes, iou_threshold)
             aps.append(ap)
-            
-            # Free memory after computing AP for each class
-            del all_pred_boxes, all_pred_scores, all_gt_boxes
-            data["pred_boxes"].clear()
-            data["pred_scores"].clear()
-            data["gt_boxes"].clear()
 
-        # Clear class_data
-        class_data.clear()
-        
-        # Final garbage collection
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-
-        # Compute mean AP
         mAP = sum(aps) / len(aps) if aps else 0.0
-
-        # Compute mean IoU
         mean_iou = sum(all_ious) / len(all_ious) if all_ious else 0.0
 
-        self.model.train()  # Restore training mode
+        self.model.train()
         return mAP, mean_iou
+
+    def _compute_iou_numpy(self, boxes1: np.ndarray, boxes2: np.ndarray) -> np.ndarray:
+        """Fast IoU computation using numpy."""
+        x1 = np.maximum(boxes1[:, None, 0], boxes2[None, :, 0])
+        y1 = np.maximum(boxes1[:, None, 1], boxes2[None, :, 1])
+        x2 = np.minimum(boxes1[:, None, 2], boxes2[None, :, 2])
+        y2 = np.minimum(boxes1[:, None, 3], boxes2[None, :, 3])
+
+        inter = np.maximum(x2 - x1, 0) * np.maximum(y2 - y1, 0)
+        area1 = (boxes1[:, 2] - boxes1[:, 0]) * (boxes1[:, 3] - boxes1[:, 1])
+        area2 = (boxes2[:, 2] - boxes2[:, 0]) * (boxes2[:, 3] - boxes2[:, 1])
+        union = area1[:, None] + area2[None, :] - inter
+
+        return inter / (union + 1e-6)
+
+    def _compute_ap_numpy(
+        self,
+        pred_boxes: np.ndarray,
+        pred_scores: np.ndarray,
+        gt_boxes: np.ndarray,
+        iou_threshold: float,
+    ) -> float:
+        """Fast AP computation using numpy."""
+        if len(gt_boxes) == 0:
+            return 1.0 if len(pred_boxes) == 0 else 0.0
+        if len(pred_boxes) == 0:
+            return 0.0
+
+        # Sort by score
+        sorted_idx = np.argsort(-pred_scores)
+        pred_boxes = pred_boxes[sorted_idx]
+
+        # Compute IoU
+        ious = self._compute_iou_numpy(pred_boxes, gt_boxes)
+
+        gt_matched = np.zeros(len(gt_boxes), dtype=bool)
+        tp = np.zeros(len(pred_boxes))
+        fp = np.zeros(len(pred_boxes))
+
+        for i in range(len(pred_boxes)):
+            iou_max = ious[i].max()
+            gt_idx = ious[i].argmax()
+
+            if iou_max >= iou_threshold and not gt_matched[gt_idx]:
+                tp[i] = 1
+                gt_matched[gt_idx] = True
+            else:
+                fp[i] = 1
+
+        tp_cumsum = np.cumsum(tp)
+        fp_cumsum = np.cumsum(fp)
+        recalls = tp_cumsum / len(gt_boxes)
+        precisions = tp_cumsum / (tp_cumsum + fp_cumsum + 1e-6)
+
+        # 11-point interpolation
+        ap = 0.0
+        for t in np.linspace(0, 1, 11):
+            mask = recalls >= t
+            if mask.any():
+                ap += precisions[mask].max() / 11
+
+        return ap
 
     def _compute_gradient_norm(self) -> float:
         """
