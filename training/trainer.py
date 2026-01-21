@@ -293,11 +293,12 @@ class Trainer:
             drop_last=True,
         )
 
+        # Use num_workers=0 for validation to avoid multiprocessing issues in notebooks
         self.val_loader = DataLoader(
             self.val_dataset,
             batch_size=1,
             shuffle=False,
-            num_workers=num_workers,
+            num_workers=0,
             collate_fn=collate_fn,
             pin_memory=True,
         )
@@ -1155,6 +1156,8 @@ class Trainer:
 
             # Overlay ground truth masks
             if "masks" in target and len(target["masks"]) > 0:
+                from scipy.ndimage import binary_dilation, binary_erosion
+                
                 gt_masks = target["masks"].cpu().numpy()
                 gt_labels_np = target["labels"].cpu().numpy()
                 for i, (mask, label) in enumerate(zip(gt_masks, gt_labels_np)):
@@ -1163,10 +1166,16 @@ class Trainer:
                     if mask.ndim == 3:
                         mask = mask[0]
                     mask_bool = mask > 0.5
+                    # Fill mask with color
                     img_gt_overlay[mask_bool] = (
                         img_gt_overlay[mask_bool] * (1 - mask_alpha)
                         + color * mask_alpha
                     )
+                    # Add dark contour outline for visibility
+                    dilated = binary_dilation(mask_bool, iterations=2)
+                    eroded = binary_erosion(mask_bool, iterations=1)
+                    contour = dilated & ~eroded
+                    img_gt_overlay[contour] = color * 0.3  # Darker outline
 
             ax_gt.imshow(img_gt_overlay)
             ax_gt.set_title(f"Ground Truth (Sample {sample_idx})")
@@ -1206,14 +1215,16 @@ class Trainer:
 
             # Overlay predicted masks
             if pred_masks is not None and len(pred_masks) > 0:
-                from scipy.ndimage import zoom
-                
-                for i, (mask, box, label) in enumerate(zip(pred_masks, pred_boxes, pred_labels)):
+                from scipy.ndimage import zoom, binary_dilation, binary_erosion
+
+                for i, (mask, box, label) in enumerate(
+                    zip(pred_masks, pred_boxes, pred_labels)
+                ):
                     color = np.array(COLORS[int(label) % len(COLORS)])
                     # Predicted masks are (1, H, W) with probabilities
                     if mask.ndim == 3:
                         mask = mask[0]
-                    
+
                     # Check if mask needs to be resized (raw 28x28 mask head output)
                     mask_h, mask_w = mask.shape
                     if mask_h != img_h or mask_w != img_w:
@@ -1222,25 +1233,33 @@ class Trainer:
                         x1, y1 = max(0, x1), max(0, y1)
                         x2, y2 = min(img_w, x2), min(img_h, y2)
                         box_h, box_w = y2 - y1, x2 - x1
-                        
+
                         if box_h > 0 and box_w > 0:
                             # Resize mask to box dimensions
                             scale_h, scale_w = box_h / mask_h, box_w / mask_w
                             resized_mask = zoom(mask, (scale_h, scale_w), order=1)
-                            
+
                             # Create full-size mask and paste
                             full_mask = np.zeros((img_h, img_w), dtype=np.float32)
                             # Handle potential size mismatches due to rounding
                             paste_h = min(resized_mask.shape[0], img_h - y1)
                             paste_w = min(resized_mask.shape[1], img_w - x1)
-                            full_mask[y1:y1+paste_h, x1:x1+paste_w] = resized_mask[:paste_h, :paste_w]
+                            full_mask[y1 : y1 + paste_h, x1 : x1 + paste_w] = (
+                                resized_mask[:paste_h, :paste_w]
+                            )
                             mask = full_mask
-                    
+
                     mask_bool = mask > 0.5
+                    # Fill mask with color
                     img_pred_overlay[mask_bool] = (
                         img_pred_overlay[mask_bool] * (1 - mask_alpha)
                         + color * mask_alpha
                     )
+                    # Add dark contour outline for visibility
+                    dilated = binary_dilation(mask_bool, iterations=2)
+                    eroded = binary_erosion(mask_bool, iterations=1)
+                    contour = dilated & ~eroded
+                    img_pred_overlay[contour] = color * 0.3  # Darker outline
 
             ax_pred.imshow(img_pred_overlay)
             ax_pred.set_title(
