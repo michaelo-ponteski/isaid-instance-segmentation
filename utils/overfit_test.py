@@ -7,45 +7,58 @@ from PIL import Image, ImageDraw
 import copy
 
 
-def overfit_single_image_test(model, dataset, idx=0, num_epochs=100, device="cuda"):
+def overfit_single_image_test(
+    model, dataset, idx=0, num_epochs=100, device="cuda", num_images=3
+):
     """
-    Test if model can overfit to a single image.
+    Test if model can overfit to a small set of images.
     This is a sanity check to ensure the model can learn.
 
     Args:
         model: Mask R-CNN model
         dataset: Dataset object
-        idx: Index of image to overfit
+        idx: Starting index of images to overfit (will use idx, idx+1, idx+2, ...)
         num_epochs: Number of epochs to train
         device: Device to use
+        num_images: Number of images to overfit (default: 3)
     """
     print("=" * 80)
-    print("OVERFIT SINGLE IMAGE TEST")
+    print(f"OVERFIT TEST ({num_images} IMAGES)")
     print("=" * 80)
 
-    # Get single image and target
-    image, target = dataset[idx]
+    # Get multiple images and targets
+    images = []
+    targets = []
 
-    # Convert to tensor if needed
-    if not isinstance(image, torch.Tensor):
-        transform = transforms.Compose(
-            [
-                transforms.ToTensor(),
-            ]
-        )
-        image = transform(image)
+    for i in range(num_images):
+        sample_idx = (idx + i) % len(dataset)  # Wrap around if needed
+        image, target = dataset[sample_idx]
 
-    print(f"\nImage shape: {image.shape}")
-    print(f"Number of instances: {len(target['boxes'])}")
-    print(f"Classes: {target['labels'].tolist()}")
+        # Convert to tensor if needed
+        if not isinstance(image, torch.Tensor):
+            transform = transforms.Compose(
+                [
+                    transforms.ToTensor(),
+                ]
+            )
+            image = transform(image)
+
+        images.append(image)
+        targets.append(target)
+
+        print(f"\nImage {i+1} (idx={sample_idx}):")
+        print(f"  Shape: {image.shape}")
+        print(f"  Instances: {len(target['boxes'])}")
+        print(f"  Classes: {target['labels'].tolist()}")
 
     # Move to device
     device = torch.device(device if torch.cuda.is_available() else "cpu")
     model = model.to(device)
-    image = image.to(device)
-    target = {
-        k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in target.items()
-    }
+    images = [img.to(device) for img in images]
+    targets = [
+        {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in t.items()}
+        for t in targets
+    ]
 
     # Use AdamW for more stable training
     params = [p for p in model.parameters() if p.requires_grad]
@@ -55,10 +68,10 @@ def overfit_single_image_test(model, dataset, idx=0, num_epochs=100, device="cud
     model.train()
     losses_history = []
 
-    print(f"\nTraining for {num_epochs} epochs...")
+    print(f"\nTraining for {num_epochs} epochs on {num_images} images...")
     for epoch in range(num_epochs):
-        # Forward pass
-        loss_dict = model([image], [target])
+        # Forward pass with all images as a batch
+        loss_dict = model(images, targets)
         losses = sum(loss for loss in loss_dict.values())
 
         # Check for NaN or inf
@@ -95,11 +108,13 @@ def overfit_single_image_test(model, dataset, idx=0, num_epochs=100, device="cud
     # Make predictions
     model.eval()
     with torch.no_grad():
-        predictions = model([image])
+        predictions = model(images)
 
-    # Visualize results
-    num_gt = len(target["boxes"])
-    visualize_predictions(image, target, predictions[0], dataset, num_gt=num_gt)
+    # Visualize results for all images
+    for i, (img, tgt, pred) in enumerate(zip(images, targets, predictions)):
+        print(f"\n--- Image {i+1} Results ---")
+        num_gt = len(tgt["boxes"])
+        visualize_predictions(img, tgt, pred, dataset, num_gt=num_gt)
 
     # Check if model learned
     final_loss = losses_history[-1]

@@ -1,6 +1,5 @@
 """
 Custom backbone with Attention for Mask R-CNN
-This provides >50% custom layers for 2 points
 """
 
 import torch

@@ -7,21 +7,19 @@ import time
 import gc
 import math
 from pathlib import Path
-from typing import Optional, Tuple, Union, Literal
+from typing import Optional, Tuple, Union, Dict, List
 
 import torch
 from torch.utils.data import DataLoader, Subset, Dataset
 from torch.amp import GradScaler, autocast
-from torch.optim.lr_scheduler import (
-    StepLR, 
-    CosineAnnealingWarmRestarts,
-    OneCycleLR,
-    ReduceLROnPlateau,
-    LambdaLR,
-)
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 from tqdm.auto import tqdm
 
-from models.maskrcnn_model import CustomMaskRCNN, get_custom_maskrcnn, get_custom_maskrcnn_with_optimized_anchors
+from models.maskrcnn_model import (
+    CustomMaskRCNN,
+    get_custom_maskrcnn,
+    get_custom_maskrcnn_with_optimized_anchors,
+)
 from datasets.isaid_dataset import iSAIDDataset
 from training.transforms import get_transforms
 
@@ -32,6 +30,100 @@ def collate_fn(batch):
     return tuple(zip(*batch))
 
 
+def compute_iou(box1: torch.Tensor, box2: torch.Tensor) -> torch.Tensor:
+    """
+    Compute IoU between two sets of boxes.
+
+    Args:
+        box1: (N, 4) tensor of boxes in xyxy format
+        box2: (M, 4) tensor of boxes in xyxy format
+
+    Returns:
+        (N, M) tensor of IoU values
+    """
+    # Intersection coordinates
+    x1 = torch.max(box1[:, None, 0], box2[None, :, 0])
+    y1 = torch.max(box1[:, None, 1], box2[None, :, 1])
+    x2 = torch.min(box1[:, None, 2], box2[None, :, 2])
+    y2 = torch.min(box1[:, None, 3], box2[None, :, 3])
+
+    # Intersection area
+    inter = torch.clamp(x2 - x1, min=0) * torch.clamp(y2 - y1, min=0)
+
+    # Union area
+    area1 = (box1[:, 2] - box1[:, 0]) * (box1[:, 3] - box1[:, 1])
+    area2 = (box2[:, 2] - box2[:, 0]) * (box2[:, 3] - box2[:, 1])
+    union = area1[:, None] + area2[None, :] - inter
+
+    return inter / (union + 1e-6)
+
+
+def compute_ap_single_class(
+    pred_boxes: torch.Tensor,
+    pred_scores: torch.Tensor,
+    gt_boxes: torch.Tensor,
+    iou_threshold: float = 0.5,
+) -> float:
+    """
+    Compute Average Precision for a single class at given IoU threshold.
+
+    Uses the 11-point interpolation method for AP computation.
+
+    Args:
+        pred_boxes: (N, 4) predicted boxes
+        pred_scores: (N,) confidence scores
+        gt_boxes: (M, 4) ground truth boxes
+        iou_threshold: IoU threshold for matching
+
+    Returns:
+        AP value (float)
+    """
+    if len(gt_boxes) == 0:
+        return 1.0 if len(pred_boxes) == 0 else 0.0
+    if len(pred_boxes) == 0:
+        return 0.0
+
+    # Sort predictions by score (descending)
+    sorted_indices = torch.argsort(pred_scores, descending=True)
+    pred_boxes = pred_boxes[sorted_indices]
+    pred_scores = pred_scores[sorted_indices]
+
+    # Compute IoU matrix
+    ious = compute_iou(pred_boxes, gt_boxes)
+
+    # Track which GT boxes have been matched
+    gt_matched = torch.zeros(len(gt_boxes), dtype=torch.bool, device=gt_boxes.device)
+
+    tp = torch.zeros(len(pred_boxes))
+    fp = torch.zeros(len(pred_boxes))
+
+    for i in range(len(pred_boxes)):
+        # Find best matching GT box
+        iou_max, gt_idx = ious[i].max(dim=0)
+
+        if iou_max >= iou_threshold and not gt_matched[gt_idx]:
+            tp[i] = 1
+            gt_matched[gt_idx] = True
+        else:
+            fp[i] = 1
+
+    # Compute precision and recall
+    tp_cumsum = torch.cumsum(tp, dim=0)
+    fp_cumsum = torch.cumsum(fp, dim=0)
+
+    recalls = tp_cumsum / len(gt_boxes)
+    precisions = tp_cumsum / (tp_cumsum + fp_cumsum + 1e-6)
+
+    # 11-point interpolation for AP
+    ap = 0.0
+    for t in torch.linspace(0, 1, 11):
+        mask = recalls >= t
+        if mask.any():
+            ap += precisions[mask].max().item() / 11
+
+    return ap
+
+
 def create_datasets(
     data_root: str,
     image_size: int = 800,
@@ -39,15 +131,15 @@ def create_datasets(
 ) -> Tuple[Dataset, Dataset]:
     """
     Create train and validation datasets.
-    
+
     This is a helper function to create datasets once and reuse them
     across multiple training runs with different models/backbones.
-    
+
     Args:
         data_root: Path to the dataset root directory
         image_size: Image size for resizing
         subset_fraction: Fraction of data to use (0.0 to 1.0)
-        
+
     Returns:
         Tuple of (train_dataset, val_dataset)
     """
@@ -83,25 +175,25 @@ def create_datasets(
         print(
             f"Using full dataset: {len(train_dataset_full)} train, {len(val_dataset_full)} val samples"
         )
-    
+
     return train_dataset, val_dataset
 
 
 class Trainer:
     """
     Trainer class for Mask R-CNN models.
-    
+
     Can be initialized in two ways:
     1. With pre-created datasets and model (recommended for multiple runs)
     2. With data_root to create datasets internally (legacy mode)
-    
+
     Example usage with external datasets and model:
         # Create datasets once
         train_ds, val_ds = create_datasets("iSAID_patches", image_size=800)
-        
+
         # Create model with custom backbone
         model = CustomMaskRCNN(num_classes=16, backbone_with_fpn=my_backbone)
-        
+
         # Train
         trainer = Trainer(
             train_dataset=train_ds,
@@ -109,7 +201,7 @@ class Trainer:
             model=model,
         )
         trainer.train(epochs=20)
-        
+
         # Train another model with same datasets
         model2 = CustomMaskRCNN(num_classes=16, backbone_with_fpn=other_backbone)
         trainer2 = Trainer(
@@ -118,7 +210,7 @@ class Trainer:
             model=model2,
         )
     """
-    
+
     def __init__(
         self,
         # New interface: pass datasets and model directly
@@ -143,13 +235,10 @@ class Trainer:
         rpn_anchor_sizes: Optional[Tuple[Tuple[int, ...], ...]] = None,
         rpn_aspect_ratios: Optional[Tuple[Tuple[float, ...], ...]] = None,
         anchor_cache_path: str = "optimized_anchors.pt",
-        # Learning rate scheduler options
-        scheduler_type: Literal["step", "cosine", "onecycle", "plateau", "warmup_cosine"] = "onecycle",
-        warmup_epochs: int = 1,
     ):
         """
         Initialize Trainer.
-        
+
         Args:
             train_dataset: Pre-created training dataset (recommended)
             val_dataset: Pre-created validation dataset (recommended)
@@ -168,22 +257,20 @@ class Trainer:
             rpn_anchor_sizes: Custom anchor sizes (legacy)
             rpn_aspect_ratios: Custom aspect ratios (legacy)
             anchor_cache_path: Path to cache optimized anchors (legacy)
-            scheduler_type: LR scheduler type - "step", "cosine", "onecycle", "plateau", "warmup_cosine"
-            warmup_epochs: Number of warmup epochs (for warmup_cosine scheduler)
         """
         self.device = torch.device(device if torch.cuda.is_available() else "cpu")
         self.use_amp = use_amp and self.device.type == "cuda"
         self.batch_size = batch_size
         self.lr = lr
-        self.scheduler_type = scheduler_type
-        self.warmup_epochs = warmup_epochs
 
         # Handle datasets
         if train_dataset is not None and val_dataset is not None:
             # Use provided datasets
             self.train_dataset = train_dataset
             self.val_dataset = val_dataset
-            print(f"Using provided datasets: {len(train_dataset)} train, {len(val_dataset)} val samples")
+            print(
+                f"Using provided datasets: {len(train_dataset)} train, {len(val_dataset)} val samples"
+            )
         elif data_root is not None:
             # Legacy mode: create datasets from data_root
             self.train_dataset, self.val_dataset = create_datasets(
@@ -193,9 +280,7 @@ class Trainer:
             )
             self.data_root = data_root
         else:
-            raise ValueError(
-                "Either provide (train_dataset, val_dataset) or data_root"
-            )
+            raise ValueError("Either provide (train_dataset, val_dataset) or data_root")
 
         # Create data loaders
         self.train_loader = DataLoader(
@@ -246,20 +331,16 @@ class Trainer:
                 print("Using default anchor configuration...")
                 self.model = get_custom_maskrcnn(num_classes=num_classes)
         else:
-            raise ValueError(
-                "Either provide a model or data_root to create one"
-            )
-        
+            raise ValueError("Either provide a model or data_root to create one")
+
         self.model.to(self.device)
 
-        # Setup optimizer and scheduler
+        # Setup optimizer (scheduler created in fit() when we know epochs)
         params = [p for p in self.model.parameters() if p.requires_grad]
         self.optimizer = torch.optim.AdamW(params, lr=lr, weight_decay=0.01)
-
-        # Scheduler will be created in fit() when we know epochs
         self.scheduler = None
-        self._scheduler_type = scheduler_type
 
+        # AMP scaler for training only (not used in LR finder)
         self.scaler = GradScaler(enabled=self.use_amp)
 
         print(f"Device: {self.device}")
@@ -267,118 +348,72 @@ class Trainer:
         print(f"Train samples: {len(self.train_dataset)}")
         print(f"Val samples: {len(self.val_dataset)}")
 
-    def _create_scheduler(self, epochs: int):
-        """Create learning rate scheduler based on scheduler_type."""
-        steps_per_epoch = len(self.train_loader)
-        total_steps = epochs * steps_per_epoch
-        
-        if self._scheduler_type == "step":
-            # Classic step decay
-            self.scheduler = StepLR(
-                self.optimizer, step_size=max(1, epochs // 3), gamma=0.1
-            )
-            self._scheduler_step_per_batch = False
-            print(f"Using StepLR scheduler (step every {epochs // 3} epochs)")
-            
-        elif self._scheduler_type == "cosine":
-            # Cosine annealing with warm restarts
-            self.scheduler = CosineAnnealingWarmRestarts(
-                self.optimizer, T_0=max(1, epochs // 4), T_mult=2, eta_min=self.lr * 0.01
-            )
-            self._scheduler_step_per_batch = False
-            print(f"Using CosineAnnealingWarmRestarts scheduler")
-            
-        elif self._scheduler_type == "onecycle":
-            # OneCycleLR - typically the best for fast convergence
-            self.scheduler = OneCycleLR(
-                self.optimizer,
-                max_lr=self.lr * 10,  # Peak LR is 10x the base
-                total_steps=total_steps,
-                pct_start=0.1,  # 10% warmup
-                anneal_strategy='cos',
-                div_factor=10,  # Initial LR = max_lr / 10
-                final_div_factor=100,  # Final LR = max_lr / 1000
-            )
-            self._scheduler_step_per_batch = True
-            print(f"Using OneCycleLR scheduler (max_lr={self.lr * 10:.6f})")
-            
-        elif self._scheduler_type == "plateau":
-            # Reduce on plateau - reactive to validation loss
-            self.scheduler = ReduceLROnPlateau(
-                self.optimizer, mode='min', factor=0.5, patience=3,
-                min_lr=self.lr * 0.001, verbose=True
-            )
-            self._scheduler_step_per_batch = False
-            self._scheduler_needs_val_loss = True
-            print(f"Using ReduceLROnPlateau scheduler")
-            
-        elif self._scheduler_type == "warmup_cosine":
-            # Linear warmup + cosine decay
-            warmup_steps = self.warmup_epochs * steps_per_epoch
-            
-            def lr_lambda(current_step):
-                if current_step < warmup_steps:
-                    return float(current_step) / float(max(1, warmup_steps))
-                progress = float(current_step - warmup_steps) / float(max(1, total_steps - warmup_steps))
-                return max(0.01, 0.5 * (1.0 + math.cos(math.pi * progress)))
-            
-            self.scheduler = LambdaLR(self.optimizer, lr_lambda)
-            self._scheduler_step_per_batch = True
-            print(f"Using Warmup+Cosine scheduler (warmup={self.warmup_epochs} epochs)")
-        else:
-            raise ValueError(f"Unknown scheduler type: {self._scheduler_type}")
+    def _create_scheduler(self):
+        """Create ReduceLROnPlateau scheduler - steps only on validation loss."""
+        # ReduceLROnPlateau: reduces LR when validation loss plateaus
+        # - mode='min': reduce LR when metric stops decreasing
+        # - factor=0.5: halve the LR on plateau
+        # - patience=2: wait 2 epochs before reducing
+        # - threshold=1e-3: minimum change to qualify as improvement
+        self.scheduler = ReduceLROnPlateau(
+            self.optimizer,
+            mode="min",
+            factor=0.5,
+            patience=2,
+            threshold=1e-3,
+            verbose=True,
+        )
+        print("Using ReduceLROnPlateau scheduler (steps on validation loss)")
 
     def find_lr(
         self,
-        start_lr: float = 1e-7,
-        end_lr: float = 1.0,
+        start_lr: float = 1e-6,
+        end_lr: float = 1e-2,
         num_iter: int = 100,
         smooth_factor: float = 0.05,
         plot: bool = True,
     ) -> float:
         """
         Learning Rate Finder using the LR range test.
-        
-        Runs a few iterations with exponentially increasing LR to find the optimal range.
-        
+
+        This is a DIAGNOSTIC TOOL ONLY - it does NOT update model weights.
+        It performs forward + backward passes to measure loss response at different LRs,
+        then restores the exact initial state.
+
         Args:
-            start_lr: Starting learning rate
-            end_lr: Maximum learning rate to test
+            start_lr: Starting learning rate (default 1e-6, safe for detection)
+            end_lr: Maximum learning rate to test (default 1e-2, avoids explosion)
             num_iter: Number of iterations
-            smooth_factor: Smoothing factor for loss curve
+            smooth_factor: Smoothing factor for loss curve (exponential moving average)
             plot: Whether to plot the results
-            
+
         Returns:
-            Suggested learning rate (point of steepest descent)
+            Suggested learning rate (LR at minimum smoothed loss / 3)
         """
         print("=" * 60)
-        print("Learning Rate Finder")
+        print("Learning Rate Finder (diagnostic only - no weight updates)")
         print("=" * 60)
-        
-        # Save initial state
-        initial_state = {
-            'model': {k: v.clone() for k, v in self.model.state_dict().items()},
-            'optimizer': {k: v.clone() if isinstance(v, torch.Tensor) else v 
-                         for k, v in self.optimizer.state_dict().items()},
-        }
-        
-        # Setup
+
+        # Save exact initial state for restoration
+        # Deep copy all tensors to ensure we can restore exactly
+        initial_model_state = {k: v.clone() for k, v in self.model.state_dict().items()}
+        initial_optimizer_state = self.optimizer.state_dict()
+        initial_lr = self.lr
+
+        # Setup - NO AMP for deterministic results
         self.model.train()
         lr_mult = (end_lr / start_lr) ** (1 / num_iter)
         lr = start_lr
-        
-        # Set initial LR
-        for param_group in self.optimizer.param_groups:
-            param_group['lr'] = lr
-        
+
         lrs = []
         losses = []
         smoothed_loss = 0
-        best_loss = float('inf')
-        
+        best_loss = float("inf")
+        best_lr = start_lr
+
         # Create iterator
         data_iter = iter(self.train_loader)
-        
+
         pbar = tqdm(range(num_iter), desc="Finding LR")
         for iteration in pbar:
             # Get batch (cycle if needed)
@@ -387,140 +422,282 @@ class Trainer:
             except StopIteration:
                 data_iter = iter(self.train_loader)
                 images, targets = next(data_iter)
-            
+
             images = [img.to(self.device) for img in images]
-            targets = [{k: v.to(self.device) if isinstance(v, torch.Tensor) else v 
-                       for k, v in t.items()} for t in targets]
-            
+            targets = [
+                {
+                    k: v.to(self.device) if isinstance(v, torch.Tensor) else v
+                    for k, v in t.items()
+                }
+                for t in targets
+            ]
+
             # Skip empty batches
-            if all(len(t['boxes']) == 0 for t in targets):
+            if all(len(t["boxes"]) == 0 for t in targets):
                 continue
-            
+
+            # Zero gradients before forward pass
             self.optimizer.zero_grad()
-            
+
             try:
-                if self.use_amp:
-                    with autocast(device_type="cuda", dtype=torch.float16):
-                        loss_dict = self.model(images, targets)
-                        loss = sum(loss_dict.values())
-                    
-                    if not torch.isfinite(loss):
-                        break
-                    
-                    self.scaler.scale(loss).backward()
-                    self.scaler.step(self.optimizer)
-                    self.scaler.update()
-                else:
-                    loss_dict = self.model(images, targets)
-                    loss = sum(loss_dict.values())
-                    
-                    if not torch.isfinite(loss):
-                        break
-                    
-                    loss.backward()
-                    self.optimizer.step()
-                
+                # Forward pass - NO AMP for consistent, deterministic results
+                loss_dict = self.model(images, targets)
+                loss = sum(loss_dict.values())
+
+                # Check for invalid loss
+                if not torch.isfinite(loss):
+                    print(f"\nNaN/Inf loss at lr={lr:.2e}, stopping")
+                    break
+
+                # Backward pass ONLY - to measure gradient response
+                # NO optimizer.step() - we don't want to update weights
+                loss.backward()
+
                 loss_val = loss.item()
-                
-                # Smooth loss
+
+                # Exponential moving average smoothing
                 if iteration == 0:
                     smoothed_loss = loss_val
                 else:
-                    smoothed_loss = smooth_factor * loss_val + (1 - smooth_factor) * smoothed_loss
-                
-                # Stop if loss explodes
+                    smoothed_loss = (
+                        smooth_factor * loss_val + (1 - smooth_factor) * smoothed_loss
+                    )
+
+                # Track best loss and corresponding LR
+                if smoothed_loss < best_loss:
+                    best_loss = smoothed_loss
+                    best_lr = lr
+
+                # Early stopping if loss diverges (4x best loss)
                 if smoothed_loss > 4 * best_loss and iteration > 10:
                     print(f"\nStopping early - loss exploding at lr={lr:.2e}")
                     break
-                
-                if smoothed_loss < best_loss:
-                    best_loss = smoothed_loss
-                
+
                 lrs.append(lr)
                 losses.append(smoothed_loss)
-                
-                pbar.set_postfix(lr=f"{lr:.2e}", loss=f"{smoothed_loss:.4f}")
-                
+
+                pbar.set_postfix(
+                    lr=f"{lr:.2e}", loss=f"{smoothed_loss:.4f}", best=f"{best_loss:.4f}"
+                )
+
             except RuntimeError as e:
                 print(f"\nError at lr={lr:.2e}: {e}")
                 break
-            
-            # Update LR
+
+            # Increase LR for next iteration (exponential schedule)
             lr *= lr_mult
-            for param_group in self.optimizer.param_groups:
-                param_group['lr'] = lr
-            
+
+            # Clean up tensors
             del images, targets, loss, loss_dict
-            torch.cuda.empty_cache()
-        
-        # Restore initial state
-        self.model.load_state_dict(initial_state['model'])
-        self.optimizer.load_state_dict(initial_state['optimizer'])
-        
-        # Find suggested LR (steepest descent point)
+
+        # Restore EXACT initial state - model never actually changed due to no optimizer.step()
+        # but we restore anyway for safety and to reset any gradient accumulation
+        self.model.load_state_dict(initial_model_state)
+        self.optimizer.load_state_dict(initial_optimizer_state)
+        self.lr = initial_lr
+        for param_group in self.optimizer.param_groups:
+            param_group["lr"] = initial_lr
+
+        # Determine suggested LR
         if len(losses) < 10:
             print("Not enough data points collected. Using default LR.")
             return self.lr
-        
-        # Compute gradient of loss curve
-        losses_arr = torch.tensor(losses)
-        lrs_arr = torch.tensor(lrs)
-        
-        # Find the point with steepest negative gradient
-        gradients = (losses_arr[1:] - losses_arr[:-1]) / (torch.log10(lrs_arr[1:]) - torch.log10(lrs_arr[:-1]))
-        
-        # Find minimum gradient (steepest descent)
-        min_grad_idx = torch.argmin(gradients).item()
-        suggested_lr = lrs[min_grad_idx]
-        
-        # Use a bit lower LR for stability (1/10th of the steepest point)
-        suggested_lr = suggested_lr / 10
-        
+
+        # Suggested LR = LR at minimum smoothed loss / 3
+        # Dividing by 3 provides a safety margin for stable training
+        suggested_lr = best_lr / 3
+
         print(f"\n{'=' * 60}")
-        print(f"Suggested Learning Rate: {suggested_lr:.6f}")
+        print(f"Best smoothed loss: {best_loss:.4f} at LR: {best_lr:.2e}")
+        print(f"Suggested Learning Rate: {suggested_lr:.6f} (best_lr / 3)")
         print(f"{'=' * 60}")
-        
+
         if plot:
             try:
                 import matplotlib.pyplot as plt
-                
+
                 fig, ax = plt.subplots(figsize=(10, 6))
-                ax.plot(lrs, losses, 'b-', linewidth=2)
-                ax.axvline(x=suggested_lr, color='r', linestyle='--', 
-                          label=f'Suggested LR: {suggested_lr:.2e}')
-                ax.axvline(x=suggested_lr * 10, color='orange', linestyle=':', 
-                          label=f'Steepest point: {suggested_lr * 10:.2e}')
-                ax.set_xscale('log')
-                ax.set_xlabel('Learning Rate (log scale)')
-                ax.set_ylabel('Loss (smoothed)')
-                ax.set_title('Learning Rate Finder')
+                ax.plot(lrs, losses, "b-", linewidth=2, label="Smoothed Loss")
+                ax.axvline(
+                    x=best_lr,
+                    color="orange",
+                    linestyle=":",
+                    label=f"Min loss LR: {best_lr:.2e}",
+                )
+                ax.axvline(
+                    x=suggested_lr,
+                    color="r",
+                    linestyle="--",
+                    label=f"Suggested LR: {suggested_lr:.2e}",
+                )
+                ax.set_xscale("log")
+                ax.set_xlabel("Learning Rate (log scale)")
+                ax.set_ylabel("Loss (smoothed)")
+                ax.set_title("Learning Rate Finder")
                 ax.legend()
                 ax.grid(True, alpha=0.3)
                 plt.tight_layout()
                 plt.show()
             except ImportError:
                 print("Matplotlib not available for plotting")
-        
+
         gc.collect()
         torch.cuda.empty_cache()
-        
+
         return suggested_lr
 
     def set_lr(self, lr: float):
         """Set learning rate for optimizer."""
         self.lr = lr
         for param_group in self.optimizer.param_groups:
-            param_group['lr'] = lr
+            param_group["lr"] = lr
         print(f"Learning rate set to: {lr:.6f}")
 
     def get_lr(self) -> float:
         """Get current learning rate."""
-        return self.optimizer.param_groups[0]['lr']
+        return self.optimizer.param_groups[0]["lr"]
+
+    @torch.no_grad()
+    def compute_map(
+        self,
+        dataloader: DataLoader,
+        iou_threshold: float = 0.5,
+        score_threshold: float = 0.5,
+        max_samples: int = None,
+    ) -> Tuple[float, float]:
+        """
+        Compute mAP@IoU and mean IoU on a dataset.
+
+        Args:
+            dataloader: DataLoader to evaluate on
+            iou_threshold: IoU threshold for mAP computation
+            score_threshold: Minimum score for predictions
+            max_samples: Maximum samples to evaluate (None = all)
+
+        Returns:
+            Tuple of (mAP@IoU, mean_IoU)
+        """
+        self.model.eval()
+
+        # Collect predictions and ground truths per class
+        # Structure: {class_id: {'pred_boxes': [], 'pred_scores': [], 'gt_boxes': []}}
+        class_data: Dict[int, Dict[str, List]] = {}
+        all_ious = []  # For mean IoU computation
+
+        num_samples = 0
+        for images, targets in dataloader:
+            if max_samples and num_samples >= max_samples:
+                break
+
+            images = [img.to(self.device) for img in images]
+
+            # Get predictions
+            with (
+                autocast(device_type="cuda", dtype=torch.float16)
+                if self.use_amp
+                else torch.no_grad()
+            ):
+                predictions = self.model(images)
+
+            for pred, target in zip(predictions, targets):
+                # Filter predictions by score
+                keep = pred["scores"] >= score_threshold
+                pred_boxes = pred["boxes"][keep].cpu()
+                pred_labels = pred["labels"][keep].cpu()
+                pred_scores = pred["scores"][keep].cpu()
+
+                gt_boxes = target["boxes"].cpu()
+                gt_labels = target["labels"].cpu()
+
+                # Compute mean IoU for this image (best matching IoU per GT box)
+                if len(pred_boxes) > 0 and len(gt_boxes) > 0:
+                    ious = compute_iou(pred_boxes, gt_boxes)
+                    # For each GT box, find best matching prediction
+                    best_ious, _ = ious.max(dim=0)
+                    all_ious.extend(best_ious.tolist())
+
+                # Collect per-class data for mAP
+                unique_labels = torch.unique(
+                    torch.cat([pred_labels, gt_labels])
+                    if len(pred_labels) > 0
+                    else gt_labels
+                )
+
+                for label in unique_labels:
+                    label_id = label.item()
+                    if label_id not in class_data:
+                        class_data[label_id] = {
+                            "pred_boxes": [],
+                            "pred_scores": [],
+                            "gt_boxes": [],
+                        }
+
+                    # Predictions for this class
+                    pred_mask = pred_labels == label
+                    if pred_mask.any():
+                        class_data[label_id]["pred_boxes"].append(pred_boxes[pred_mask])
+                        class_data[label_id]["pred_scores"].append(
+                            pred_scores[pred_mask]
+                        )
+
+                    # Ground truths for this class
+                    gt_mask = gt_labels == label
+                    if gt_mask.any():
+                        class_data[label_id]["gt_boxes"].append(gt_boxes[gt_mask])
+
+            num_samples += len(images)
+
+        # Compute AP per class
+        aps = []
+        for label_id, data in class_data.items():
+            # Concatenate all predictions and GTs for this class
+            if data["pred_boxes"]:
+                all_pred_boxes = torch.cat(data["pred_boxes"])
+                all_pred_scores = torch.cat(data["pred_scores"])
+            else:
+                all_pred_boxes = torch.zeros((0, 4))
+                all_pred_scores = torch.zeros(0)
+
+            if data["gt_boxes"]:
+                all_gt_boxes = torch.cat(data["gt_boxes"])
+            else:
+                all_gt_boxes = torch.zeros((0, 4))
+
+            ap = compute_ap_single_class(
+                all_pred_boxes, all_pred_scores, all_gt_boxes, iou_threshold
+            )
+            aps.append(ap)
+
+        # Compute mean AP
+        mAP = sum(aps) / len(aps) if aps else 0.0
+
+        # Compute mean IoU
+        mean_iou = sum(all_ious) / len(all_ious) if all_ious else 0.0
+
+        self.model.train()  # Restore training mode
+        return mAP, mean_iou
+
+    def _compute_gradient_norm(self) -> float:
+        """
+        Compute global L2 gradient norm across all parameters.
+
+        This metric helps diagnose training stability - high or fluctuating
+        gradient norms may indicate learning rate issues.
+        """
+        total_norm_sq = 0.0
+        for p in self.model.parameters():
+            if p.grad is not None:
+                total_norm_sq += p.grad.data.norm(2).item() ** 2
+        return math.sqrt(total_norm_sq)
 
     def train_epoch(self, epoch):
         self.model.train()
         total_loss = 0.0
         loss_accumulator = {}
+
+        # Training dynamics tracking
+        batch_losses = []  # For loss variance computation
+        gradient_norms = []  # For epoch-averaged gradient norm
 
         pbar = tqdm(self.train_loader, desc=f"Train Epoch {epoch}")
 
@@ -597,6 +774,13 @@ class Trainer:
 
                 loss_value = loss.item()
                 total_loss += loss_value
+                batch_losses.append(loss_value)  # Track for variance computation
+
+                # Compute gradient norm AFTER backward, BEFORE optimizer step
+                # This measures the actual gradient magnitude used for updates
+                grad_norm = self._compute_gradient_norm()
+                gradient_norms.append(grad_norm)
+
                 # Accumulate individual losses
                 for k, v in loss_dict.items():
                     loss_accumulator.setdefault(k, 0.0)
@@ -606,11 +790,8 @@ class Trainer:
                 loss_postfix["total"] = f"{loss_value:.4f}"
                 loss_postfix["lr"] = f"{self.get_lr():.2e}"
                 pbar.set_postfix(loss=loss_postfix)
-                
-                # Step scheduler per batch if needed (OneCycleLR, warmup_cosine)
-                if self.scheduler is not None and getattr(self, '_scheduler_step_per_batch', False):
-                    self.scheduler.step()
-                    
+                # Note: scheduler steps only on validation loss, not per-batch
+
             except RuntimeError as e:
                 print(f"Warning: RuntimeError in batch: {e}, skipping")
                 self.optimizer.zero_grad(set_to_none=True)
@@ -618,18 +799,32 @@ class Trainer:
                 continue
 
             del images, targets, loss, loss_dict
-            torch.cuda.empty_cache()
 
-        # Step scheduler per epoch if needed (StepLR, Cosine)
-        if self.scheduler is not None and not getattr(self, '_scheduler_step_per_batch', False):
-            if not getattr(self, '_scheduler_needs_val_loss', False):
-                self.scheduler.step()
-        
-        # Return average losses
+        # Note: ReduceLROnPlateau scheduler steps on validation loss in fit()
+
+        # Compute training dynamics metrics
+        # Loss variance: measures stability of training within epoch
+        # High variance may indicate noisy gradients or LR issues
+        if len(batch_losses) > 1:
+            mean_loss = sum(batch_losses) / len(batch_losses)
+            loss_variance = sum((l - mean_loss) ** 2 for l in batch_losses) / (
+                len(batch_losses) - 1
+            )
+        else:
+            loss_variance = 0.0
+
+        # Epoch-averaged gradient norm
+        avg_grad_norm = (
+            sum(gradient_norms) / len(gradient_norms) if gradient_norms else 0.0
+        )
+
+        # Return average losses plus training dynamics
         avg_losses = {
             k: v / len(self.train_loader) for k, v in loss_accumulator.items()
         }
         avg_losses["total"] = total_loss / len(self.train_loader)
+        avg_losses["grad_norm"] = avg_grad_norm
+        avg_losses["loss_variance"] = loss_variance
         return avg_losses
 
     @torch.no_grad()
@@ -668,7 +863,6 @@ class Trainer:
             pbar.set_postfix(loss=loss_postfix)
 
             del images, targets, loss, loss_dict
-            torch.cuda.empty_cache()
 
         # Return average losses
         avg_losses = {k: v / len(self.val_loader) for k, v in loss_accumulator.items()}
@@ -698,61 +892,163 @@ class Trainer:
         print(f"  Val Loss: {checkpoint.get('val_loss', 'N/A'):.4f}")
         return checkpoint
 
-    def fit(self, epochs=20, save_dir="checkpoints", find_lr_first=False):
+    def fit(
+        self,
+        epochs=20,
+        save_dir="checkpoints",
+        find_lr_first=False,
+        compute_metrics_every: int = 1,
+        max_map_samples: int = None,
+    ) -> Dict[str, List[float]]:
         """
         Train the model.
-        
+
         Args:
             epochs: Number of epochs to train
             save_dir: Directory to save checkpoints
             find_lr_first: If True, run LR finder before training
+            compute_metrics_every: Compute mAP metrics every N epochs (default=1)
+            max_map_samples: Max samples for mAP computation (None=all, use smaller for speed)
+
+        Returns:
+            history: Dictionary of metric lists, compatible with TensorBoard logging.
+                Keys follow convention: 'train/<metric>', 'val/<metric>', 'train_val/<metric>'
         """
-        # Optionally find best LR
+        # Initialize history dictionary for all metrics
+        # TensorBoard-compatible naming: prefix/metric_name
+        history: Dict[str, List[float]] = {
+            # Loss metrics (existing)
+            "train/loss": [],
+            "val/loss": [],
+            # Performance metrics (mAP, IoU)
+            "train/mAP@0.5": [],
+            "val/mAP@0.5": [],
+            "val/mean_iou": [],
+            # Training dynamics metrics
+            "train/grad_norm": [],
+            "train/loss_variance": [],
+            "train_val/mAP_gap": [],
+            # Learning rate tracking
+            "train/lr": [],
+        }
+
+        # Optionally find best LR before training
         if find_lr_first:
             suggested_lr = self.find_lr()
             self.set_lr(suggested_lr)
-        
-        # Create scheduler now that we know epochs
-        self._create_scheduler(epochs)
-        
+
+        # Create ReduceLROnPlateau scheduler
+        self._create_scheduler()
+
         best_loss = float("inf")
+        best_map = 0.0
 
         for epoch in range(1, epochs + 1):
-            print(f"\n{'=' * 50}")
+            print(f"\n{'=' * 60}")
             print(f"Epoch {epoch}/{epochs} | LR: {self.get_lr():.2e}")
-            print(f"{'=' * 50}")
+            print(f"{'=' * 60}")
 
             start = time.time()
+
+            # Training epoch (includes gradient norm and loss variance)
             train_losses = self.train_epoch(epoch)
+
+            # Validation (loss only)
             val_losses = self.validate()
+
+            # Compute performance metrics (mAP, IoU)
+            if epoch % compute_metrics_every == 0:
+                print("Computing mAP metrics...")
+                # Validation mAP and mean IoU (primary metrics)
+                val_map, val_mean_iou = self.compute_map(
+                    self.val_loader,
+                    iou_threshold=0.5,
+                    max_samples=max_map_samples,
+                )
+                # Training mAP (for overfitting diagnosis)
+                train_map, _ = self.compute_map(
+                    self.train_loader,
+                    iou_threshold=0.5,
+                    max_samples=max_map_samples,
+                )
+                # mAP gap: positive = overfitting, negative = underfitting
+                map_gap = train_map - val_map
+            else:
+                # Use previous values if not computing this epoch
+                val_map = history["val/mAP@0.5"][-1] if history["val/mAP@0.5"] else 0.0
+                val_mean_iou = (
+                    history["val/mean_iou"][-1] if history["val/mean_iou"] else 0.0
+                )
+                train_map = (
+                    history["train/mAP@0.5"][-1] if history["train/mAP@0.5"] else 0.0
+                )
+                map_gap = (
+                    history["train_val/mAP_gap"][-1]
+                    if history["train_val/mAP_gap"]
+                    else 0.0
+                )
+
             epoch_time = time.time() - start
 
-            # Print detailed losses
+            # Record metrics in history
+            history["train/loss"].append(train_losses["total"])
+            history["val/loss"].append(val_losses["total"])
+            history["train/mAP@0.5"].append(train_map)
+            history["val/mAP@0.5"].append(val_map)
+            history["val/mean_iou"].append(val_mean_iou)
+            history["train/grad_norm"].append(train_losses["grad_norm"])
+            history["train/loss_variance"].append(train_losses["loss_variance"])
+            history["train_val/mAP_gap"].append(map_gap)
+            history["train/lr"].append(self.get_lr())
+
+            # Print detailed results
             print(f"\nEpoch {epoch} Results (Time: {epoch_time:.1f}s):")
-            print(f"  Train Losses:")
+            print(f"  Losses:")
+            print(f"    Train: {train_losses['total']:.4f}")
+            print(f"    Val:   {val_losses['total']:.4f}")
+            print(f"  Performance Metrics:")
+            print(f"    Train mAP@0.5: {train_map:.4f}")
+            print(f"    Val mAP@0.5:   {val_map:.4f} (primary metric)")
+            print(f"    Val Mean IoU:  {val_mean_iou:.4f}")
+            print(f"  Training Dynamics:")
+            print(f"    Gradient Norm: {train_losses['grad_norm']:.4f}")
+            print(f"    Loss Variance: {train_losses['loss_variance']:.6f}")
+            print(f"    mAP Gap (train-val): {map_gap:+.4f}")
+            print(f"  Detailed Train Losses:")
             for k, v in train_losses.items():
-                print(f"    {k}: {v:.4f}")
-            print(f"  Val Losses:")
-            for k, v in val_losses.items():
-                print(f"    {k}: {v:.4f}")
+                if k not in ["total", "grad_norm", "loss_variance"]:
+                    print(f"    {k}: {v:.4f}")
 
             val_loss = val_losses["total"]
-            
-            # Step plateau scheduler with validation loss
-            if self.scheduler is not None and getattr(self, '_scheduler_needs_val_loss', False):
+
+            # Step ReduceLROnPlateau scheduler with validation loss
+            if self.scheduler is not None:
                 self.scheduler.step(val_loss)
-            
+
             self.save_checkpoint(f"{save_dir}/last.pth", epoch, val_loss)
 
+            # Save best model based on validation loss
             if val_loss < best_loss:
                 best_loss = val_loss
                 self.save_checkpoint(f"{save_dir}/best.pth", epoch, val_loss)
-                print("-> New best model saved")
+                print("-> New best model saved (by loss)")
+
+            # Also track best mAP
+            if val_map > best_map:
+                best_map = val_map
+                self.save_checkpoint(f"{save_dir}/best_map.pth", epoch, val_loss)
+                print(f"-> New best mAP@0.5: {best_map:.4f}")
 
             gc.collect()
             torch.cuda.empty_cache()
 
-        print(f"\nTraining complete. Best val loss: {best_loss:.4f}")
+        print(f"\n{'=' * 60}")
+        print(f"Training complete!")
+        print(f"  Best val loss: {best_loss:.4f}")
+        print(f"  Best val mAP@0.5: {best_map:.4f}")
+        print(f"{'=' * 60}")
+
+        return history
 
     @torch.no_grad()
     def visualize_predictions(self, num_samples=5, score_threshold=0.5, save_path=None):
@@ -806,11 +1102,12 @@ class Trainer:
                 img_display = (img_display * 255).astype(np.uint8)
 
             # Get predictions
-            image_tensor = (
-                image.unsqueeze(0).to(self.device)
-                if len(image.shape) == 3
-                else image.to(self.device)
-            )
+            # Ensure image is a tensor and move to device
+            if not isinstance(image, torch.Tensor):
+                import torchvision.transforms.functional as F
+
+                image = F.to_tensor(image)
+            image_tensor = image.to(self.device)
             predictions = self.model([image_tensor])[0]
 
             # Filter predictions by score
