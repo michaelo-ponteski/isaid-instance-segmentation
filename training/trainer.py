@@ -566,7 +566,7 @@ class Trainer:
         max_samples: int = None,
     ) -> Tuple[float, float]:
         """
-        Compute mAP@IoU and mean IoU on a dataset.
+        Compute mAP@IoU and mean IoU on a dataset (memory-efficient version).
 
         Args:
             dataloader: DataLoader to evaluate on
@@ -585,7 +585,7 @@ class Trainer:
         all_ious = []  # For mean IoU computation
 
         num_samples = 0
-        for images, targets in dataloader:
+        for batch_idx, (images, targets) in enumerate(dataloader):
             if max_samples and num_samples >= max_samples:
                 break
 
@@ -599,15 +599,22 @@ class Trainer:
             ):
                 predictions = self.model(images)
 
+            # Move predictions to CPU immediately to free GPU memory
+            predictions = [{k: v.detach().cpu() for k, v in pred.items()} for pred in predictions]
+            
+            # Clear GPU cache after inference
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
             for pred, target in zip(predictions, targets):
                 # Filter predictions by score
                 keep = pred["scores"] >= score_threshold
-                pred_boxes = pred["boxes"][keep].cpu()
-                pred_labels = pred["labels"][keep].cpu()
-                pred_scores = pred["scores"][keep].cpu()
+                pred_boxes = pred["boxes"][keep]
+                pred_labels = pred["labels"][keep]
+                pred_scores = pred["scores"][keep]
 
-                gt_boxes = target["boxes"].cpu()
-                gt_labels = target["labels"].cpu()
+                gt_boxes = target["boxes"]
+                gt_labels = target["labels"]
 
                 # Compute mean IoU for this image (best matching IoU per GT box)
                 if len(pred_boxes) > 0 and len(gt_boxes) > 0:
@@ -615,6 +622,7 @@ class Trainer:
                     # For each GT box, find best matching prediction
                     best_ious, _ = ious.max(dim=0)
                     all_ious.extend(best_ious.tolist())
+                    del ious, best_ious  # Free memory immediately
 
                 # Collect per-class data for mAP
                 unique_labels = torch.unique(
@@ -635,19 +643,26 @@ class Trainer:
                     # Predictions for this class
                     pred_mask = pred_labels == label
                     if pred_mask.any():
-                        class_data[label_id]["pred_boxes"].append(pred_boxes[pred_mask])
-                        class_data[label_id]["pred_scores"].append(
-                            pred_scores[pred_mask]
-                        )
+                        class_data[label_id]["pred_boxes"].append(pred_boxes[pred_mask].clone())
+                        class_data[label_id]["pred_scores"].append(pred_scores[pred_mask].clone())
 
                     # Ground truths for this class
                     gt_mask = gt_labels == label
                     if gt_mask.any():
-                        class_data[label_id]["gt_boxes"].append(gt_boxes[gt_mask])
+                        class_data[label_id]["gt_boxes"].append(gt_boxes[gt_mask].clone())
+                
+                # Clean up after each image
+                del pred_boxes, pred_labels, pred_scores, gt_boxes, gt_labels, pred, target
 
             num_samples += len(images)
+            
+            # Periodic garbage collection every 10 batches
+            if batch_idx % 10 == 0:
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
 
-        # Compute AP per class
+        # Compute AP per class (process one class at a time to reduce peak memory)
         aps = []
         for label_id, data in class_data.items():
             # Concatenate all predictions and GTs for this class
@@ -667,6 +682,20 @@ class Trainer:
                 all_pred_boxes, all_pred_scores, all_gt_boxes, iou_threshold
             )
             aps.append(ap)
+            
+            # Free memory after computing AP for each class
+            del all_pred_boxes, all_pred_scores, all_gt_boxes
+            data["pred_boxes"].clear()
+            data["pred_scores"].clear()
+            data["gt_boxes"].clear()
+
+        # Clear class_data
+        class_data.clear()
+        
+        # Final garbage collection
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
         # Compute mean AP
         mAP = sum(aps) / len(aps) if aps else 0.0
@@ -1157,7 +1186,7 @@ class Trainer:
             # Overlay ground truth masks
             if "masks" in target and len(target["masks"]) > 0:
                 from scipy.ndimage import binary_dilation, binary_erosion
-                
+
                 gt_masks = target["masks"].cpu().numpy()
                 gt_labels_np = target["labels"].cpu().numpy()
                 for i, (mask, label) in enumerate(zip(gt_masks, gt_labels_np)):

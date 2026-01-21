@@ -220,7 +220,7 @@ def visualize_predictions(
     # Overlay ground truth masks
     if "masks" in target and len(target["masks"]) > 0:
         from scipy.ndimage import binary_dilation, binary_erosion
-        
+
         gt_masks = target["masks"].cpu().numpy()
         gt_labels = target["labels"].cpu().numpy()
         for mask, label in zip(gt_masks, gt_labels):
