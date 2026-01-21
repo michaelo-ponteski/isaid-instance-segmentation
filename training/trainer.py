@@ -1090,15 +1090,21 @@ class Trainer:
         for idx, sample_idx in enumerate(indices):
             image, target = self.val_dataset[sample_idx]
 
-            # Convert image for visualization
+            # Convert image for visualization and denormalize if needed
             if isinstance(image, torch.Tensor):
                 img_display = image.permute(1, 2, 0).cpu().numpy()
             else:
                 img_display = np.array(image)
 
-            # Normalize if needed
-            if img_display.max() <= 1.0:
-                img_display = (img_display * 255).astype(np.uint8)
+            # Check if image is normalized (values outside 0-1 range) and denormalize
+            if img_display.min() < 0 or img_display.max() > 1:
+                # Denormalize using ImageNet mean/std
+                mean = np.array([0.485, 0.456, 0.406])
+                std = np.array([0.229, 0.224, 0.225])
+                img_display = img_display * std + mean
+            
+            # Clip to valid range and convert to displayable format
+            img_display = np.clip(img_display, 0, 1)
 
             # Get predictions
             # Ensure image is a tensor and move to device

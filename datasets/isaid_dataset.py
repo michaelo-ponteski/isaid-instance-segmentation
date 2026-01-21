@@ -242,9 +242,17 @@ def visualize_sample(dataset, idx):
 
     plt.figure(figsize=(12, 8))
 
-    # Convert tensor to numpy for visualization
+    # Convert tensor to numpy for visualization and denormalize if needed
     if isinstance(image, torch.Tensor):
         image_np = image.permute(1, 2, 0).numpy()
+        # Check if image is normalized (values outside 0-1 range)
+        if image_np.min() < 0 or image_np.max() > 1:
+            # Denormalize using ImageNet mean/std
+            mean = np.array([0.485, 0.456, 0.406])
+            std = np.array([0.229, 0.224, 0.225])
+            image_np = image_np * std + mean
+        # Clip to valid range
+        image_np = np.clip(image_np, 0, 1)
     else:
         image_np = np.array(image)
 
@@ -267,7 +275,11 @@ def visualize_sample(dataset, idx):
                 base_dataset = dataset.dataset
             else:
                 base_dataset = dataset
-            cat_names = base_dataset.get_category_names() if hasattr(base_dataset, "get_category_names") else {}
+            cat_names = (
+                base_dataset.get_category_names()
+                if hasattr(base_dataset, "get_category_names")
+                else {}
+            )
             cat_name = cat_names.get(int(label), f"Class {label}")
 
             plt.text(
