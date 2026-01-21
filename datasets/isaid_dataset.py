@@ -262,8 +262,12 @@ def visualize_sample(dataset, idx):
                 (x1, y1), x2 - x1, y2 - y1, fill=False, edgecolor="red", linewidth=2
             )
             ax.add_patch(rect)
-            # Get category name if available
-            cat_names = dataset.get_category_names()
+            # Get category name if available - handle Subset wrapper
+            if hasattr(dataset, "dataset"):
+                base_dataset = dataset.dataset
+            else:
+                base_dataset = dataset
+            cat_names = base_dataset.get_category_names() if hasattr(base_dataset, "get_category_names") else {}
             cat_name = cat_names.get(int(label), f"Class {label}")
 
             plt.text(

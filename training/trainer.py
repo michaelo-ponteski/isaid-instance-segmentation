@@ -361,7 +361,6 @@ class Trainer:
             factor=0.5,
             patience=2,
             threshold=1e-3,
-            verbose=True,
         )
         print("Using ReduceLROnPlateau scheduler (steps on validation loss)")
 

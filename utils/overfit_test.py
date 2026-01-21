@@ -164,7 +164,12 @@ def visualize_predictions(
     else:
         image_np = np.array(image)
 
-    cat_names = dataset.get_category_names()
+    # Handle Subset wrapper - access underlying dataset
+    if hasattr(dataset, "dataset"):
+        base_dataset = dataset.dataset
+    else:
+        base_dataset = dataset
+    cat_names = base_dataset.get_category_names() if hasattr(base_dataset, "get_category_names") else {}
     fig, axes = plt.subplots(1, 2, figsize=(12, 5))
 
     # Ground truth
