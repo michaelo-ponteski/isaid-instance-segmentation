@@ -1050,19 +1050,27 @@ class Trainer:
         return history
 
     @torch.no_grad()
-    def visualize_predictions(self, num_samples=5, score_threshold=0.5, save_path=None):
-        """Visualize model predictions on validation set.
+    def visualize_predictions(self, num_samples=5, score_threshold=0.5, save_path=None, mask_alpha=0.4):
+        """Visualize model predictions on validation set with masks.
 
         Args:
             num_samples: Number of validation samples to visualize
             score_threshold: Minimum confidence score for predictions
             save_path: Optional path to save the figure
+            mask_alpha: Transparency for mask overlay (0-1)
         """
         import matplotlib.pyplot as plt
         import matplotlib.patches as patches
         import numpy as np
 
         self.model.eval()
+
+        # Colors for different instances (distinct colors)
+        COLORS = [
+            [1, 0, 0], [0, 1, 0], [0, 0, 1], [1, 1, 0], [1, 0, 1], [0, 1, 1],
+            [0.5, 0, 0], [0, 0.5, 0], [0, 0, 0.5], [0.5, 0.5, 0], [0.5, 0, 0.5],
+            [0, 0.5, 0.5], [1, 0.5, 0], [1, 0, 0.5], [0.5, 1, 0], [0, 1, 0.5],
+        ]
 
         # Get category names if available
         if hasattr(self.val_dataset, "dataset"):
@@ -1102,7 +1110,7 @@ class Trainer:
                 mean = np.array([0.485, 0.456, 0.406])
                 std = np.array([0.229, 0.224, 0.225])
                 img_display = img_display * std + mean
-            
+
             # Clip to valid range and convert to displayable format
             img_display = np.clip(img_display, 0, 1)
 
@@ -1120,25 +1128,43 @@ class Trainer:
             pred_boxes = predictions["boxes"][keep_idx].cpu().numpy()
             pred_labels = predictions["labels"][keep_idx].cpu().numpy()
             pred_scores = predictions["scores"][keep_idx].cpu().numpy()
+            pred_masks = predictions["masks"][keep_idx].cpu().numpy() if "masks" in predictions else None
 
-            # Ground truth visualization
+            # Ground truth visualization with masks
             ax_gt = axes[idx, 0]
-            ax_gt.imshow(img_display)
+            img_gt_overlay = img_display.copy()
+
+            # Overlay ground truth masks
+            if "masks" in target and len(target["masks"]) > 0:
+                gt_masks = target["masks"].cpu().numpy()
+                gt_labels_np = target["labels"].cpu().numpy()
+                for i, (mask, label) in enumerate(zip(gt_masks, gt_labels_np)):
+                    color = np.array(COLORS[int(label) % len(COLORS)])
+                    # Handle different mask formats (H,W) or (1,H,W)
+                    if mask.ndim == 3:
+                        mask = mask[0]
+                    mask_bool = mask > 0.5
+                    img_gt_overlay[mask_bool] = (
+                        img_gt_overlay[mask_bool] * (1 - mask_alpha) + color * mask_alpha
+                    )
+
+            ax_gt.imshow(img_gt_overlay)
             ax_gt.set_title(f"Ground Truth (Sample {sample_idx})")
             ax_gt.axis("off")
 
             if "boxes" in target and len(target["boxes"]) > 0:
                 gt_boxes = target["boxes"].cpu().numpy()
-                gt_labels = target["labels"].cpu().numpy()
+                gt_labels_np = target["labels"].cpu().numpy()
 
-                for box, label in zip(gt_boxes, gt_labels):
+                for i, (box, label) in enumerate(zip(gt_boxes, gt_labels_np)):
                     x1, y1, x2, y2 = box
+                    color = COLORS[int(label) % len(COLORS)]
                     rect = patches.Rectangle(
                         (x1, y1),
                         x2 - x1,
                         y2 - y1,
                         linewidth=2,
-                        edgecolor="green",
+                        edgecolor=color,
                         facecolor="none",
                     )
                     ax_gt.add_patch(rect)
@@ -1150,25 +1176,40 @@ class Trainer:
                         cat_name,
                         color="white",
                         fontsize=8,
-                        bbox=dict(facecolor="green", alpha=0.7),
+                        bbox=dict(facecolor=color, alpha=0.7),
                     )
 
-            # Predictions visualization
+            # Predictions visualization with masks
             ax_pred = axes[idx, 1]
-            ax_pred.imshow(img_display)
+            img_pred_overlay = img_display.copy()
+
+            # Overlay predicted masks
+            if pred_masks is not None and len(pred_masks) > 0:
+                for i, (mask, label) in enumerate(zip(pred_masks, pred_labels)):
+                    color = np.array(COLORS[int(label) % len(COLORS)])
+                    # Predicted masks are (1, H, W) with probabilities
+                    if mask.ndim == 3:
+                        mask = mask[0]
+                    mask_bool = mask > 0.5
+                    img_pred_overlay[mask_bool] = (
+                        img_pred_overlay[mask_bool] * (1 - mask_alpha) + color * mask_alpha
+                    )
+
+            ax_pred.imshow(img_pred_overlay)
             ax_pred.set_title(
                 f"Predictions (Sample {sample_idx}, {len(pred_boxes)} detections)"
             )
             ax_pred.axis("off")
 
-            for box, label, score in zip(pred_boxes, pred_labels, pred_scores):
+            for i, (box, label, score) in enumerate(zip(pred_boxes, pred_labels, pred_scores)):
                 x1, y1, x2, y2 = box
+                color = COLORS[int(label) % len(COLORS)]
                 rect = patches.Rectangle(
                     (x1, y1),
                     x2 - x1,
                     y2 - y1,
                     linewidth=2,
-                    edgecolor="red",
+                    edgecolor=color,
                     facecolor="none",
                 )
                 ax_pred.add_patch(rect)
@@ -1180,7 +1221,7 @@ class Trainer:
                     f"{cat_name} {score:.2f}",
                     color="white",
                     fontsize=8,
-                    bbox=dict(facecolor="red", alpha=0.7),
+                    bbox=dict(facecolor=color, alpha=0.7),
                 )
 
         plt.tight_layout()

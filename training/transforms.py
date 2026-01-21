@@ -1,7 +1,7 @@
 """
 Simple transforms for training and validation.
 
-NOTE: Spatial augmentations (flip, rotate) are applied in the dataset's __getitem__ 
+NOTE: Spatial augmentations (flip, rotate) are applied in the dataset's __getitem__
 to ensure bounding boxes and masks are transformed together with the image.
 These transforms only handle normalization and tensor conversion.
 """
@@ -28,7 +28,7 @@ class Transform:
 def get_transforms(train=True):
     """
     Get transforms for training or validation.
-    
+
     NOTE: Only normalization is applied here. Spatial augmentations (flip, rotate)
     should be applied in the dataset where boxes/masks can be transformed together.
     """
@@ -47,7 +47,9 @@ def get_transforms(train=True):
 def get_visualization_transform():
     """Get transform for visualization (tensor only, no normalization)."""
     return Transform(
-        A.Compose([
-            ToTensorV2(),
-        ])
+        A.Compose(
+            [
+                ToTensorV2(),
+            ]
+        )
     )
