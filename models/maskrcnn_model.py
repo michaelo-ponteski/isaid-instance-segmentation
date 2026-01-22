@@ -1,6 +1,6 @@
 """
 Custom Mask R-CNN model with modified architecture.
-Achieves >50% custom layers for 2 points + attention for +1 point.
+>50% custom layers + attention
 """
 
 import torch
@@ -82,7 +82,7 @@ class CustomMaskRCNN(nn.Module):
         self.rpn = RegionProposalNetwork(
             anchor_generator=anchor_generator,
             head=rpn_head,
-            fg_iou_thresh=0.7,
+            fg_iou_thresh=0.5, # Foreground IoU threshold changed from 0.7 for better recall
             bg_iou_thresh=0.3,
             batch_size_per_image=256,
             positive_fraction=0.5,
