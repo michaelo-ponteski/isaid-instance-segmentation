@@ -7,6 +7,14 @@ from .anchor_optimizer import (
     optimize_anchors_for_dataset,
     analyze_dataset_anchors,
 )
+from .wandb_logger import (
+    WandbLogger,
+    WandbConfig,
+    create_wandb_logger,
+    compute_gradient_norms,
+    ISAID_CLASS_LABELS,
+    ISAID_CLASS_COLORS,
+)
 
 __all__ = [
     "Trainer",
@@ -18,4 +26,10 @@ __all__ = [
     "DatasetAnchorAnalyzer",
     "optimize_anchors_for_dataset",
     "analyze_dataset_anchors",
+    "WandbLogger",
+    "WandbConfig",
+    "create_wandb_logger",
+    "compute_gradient_norms",
+    "ISAID_CLASS_LABELS",
+    "ISAID_CLASS_COLORS",
 ]
