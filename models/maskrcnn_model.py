@@ -38,8 +38,8 @@ class CustomMaskRCNN(nn.Module):
         # Custom backbone support
         backbone_with_fpn=None,  # Optional: pass a pre-built BackboneWithFPN
         fpn_out_channels=256,    # FPN output channels (must match backbone if provided)
-        # RPN parameters - smaller anchors for satellite imagery (small vehicles etc)
-        rpn_anchor_sizes=((16, 24), (32, 48), (64, 96), (128, 192)),
+        # RPN parameters - anchors found with anchor optimizer
+        rpn_anchor_sizes=((8, 16), (16, 32), (32, 64), (64, 128)),
         rpn_aspect_ratios=((0.5, 1.0, 2.0),) * 4,
         # RoI parameters
         box_roi_pool_output_size=7,
