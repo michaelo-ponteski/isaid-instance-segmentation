@@ -21,10 +21,10 @@ anchors:
   # Each tuple corresponds to an FPN level (P2, P3, P4, P5)
   # Default values are optimized for satellite imagery with small objects
   sizes:
-    - [16, 24]   # P2 - smallest objects
-    - [32, 48]   # P3
-    - [64, 96]   # P4  
-    - [128, 192] # P5 - largest objects
+    - [8, 16]   # P2 - smallest objects
+    - [16, 32]   # P3
+    - [32, 64]   # P4  
+    - [64, 128] # P5 - largest objects
   
   # Aspect ratios for each anchor size
   aspect_ratios: [0.5, 1.0, 2.0]

@@ -1,6 +1,6 @@
 """
 Custom Mask R-CNN model with modified architecture.
-Achieves >50% custom layers for 2 points + attention for +1 point.
+>50% custom layers + attention
 """
 
 import torch
@@ -38,8 +38,8 @@ class CustomMaskRCNN(nn.Module):
         # Custom backbone support
         backbone_with_fpn=None,  # Optional: pass a pre-built BackboneWithFPN
         fpn_out_channels=256,    # FPN output channels (must match backbone if provided)
-        # RPN parameters - smaller anchors for satellite imagery (small vehicles etc)
-        rpn_anchor_sizes=((16, 24), (32, 48), (64, 96), (128, 192)),
+        # RPN parameters - anchors found with anchor optimizer
+        rpn_anchor_sizes=((8, 16), (16, 32), (32, 64), (64, 128)),
         rpn_aspect_ratios=((0.5, 1.0, 2.0),) * 4,
         # RoI parameters
         box_roi_pool_output_size=7,
@@ -82,7 +82,7 @@ class CustomMaskRCNN(nn.Module):
         self.rpn = RegionProposalNetwork(
             anchor_generator=anchor_generator,
             head=rpn_head,
-            fg_iou_thresh=0.7,
+            fg_iou_thresh=0.5, # Foreground IoU threshold changed from 0.7 for better recall
             bg_iou_thresh=0.3,
             batch_size_per_image=256,
             positive_fraction=0.5,
