@@ -959,12 +959,7 @@ class Trainer:
                     self.scaler.scale(loss).backward()
                     self.scaler.unscale_(self.optimizer)
 
-                    # Clip gradients - replace NaN/Inf with zeros and clip
-                    for param in self.model.parameters():
-                        if param.grad is not None:
-                            torch.nan_to_num_(
-                                param.grad, nan=0.0, posinf=0.0, neginf=0.0
-                            )
+                    # Clip gradients (GradScaler will skip step if NaN/Inf detected)
                     torch.nn.utils.clip_grad_norm_(
                         self.model.parameters(), max_norm=1.0
                     )
@@ -984,12 +979,7 @@ class Trainer:
 
                     loss.backward()
 
-                    # Clip gradients - replace NaN/Inf with zeros and clip
-                    for param in self.model.parameters():
-                        if param.grad is not None:
-                            torch.nan_to_num_(
-                                param.grad, nan=0.0, posinf=0.0, neginf=0.0
-                            )
+                    # Clip gradients
                     torch.nn.utils.clip_grad_norm_(
                         self.model.parameters(), max_norm=1.0
                     )
