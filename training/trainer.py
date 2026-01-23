@@ -1,5 +1,5 @@
 """
-Training loop for Mask R-CNN (memory-safe version).
+Training loop for Mask R-CNN (memory-safe version) with optional W&B integration.
 """
 
 import os
@@ -8,12 +8,12 @@ import gc
 import math
 import numpy as np
 from pathlib import Path
-from typing import Optional, Tuple, Union, Dict, List
+from typing import Optional, Tuple, Union, Dict, List, Any
 
 import torch
 from torch.utils.data import DataLoader, Subset, Dataset
 from torch.amp import GradScaler, autocast
-from torch.optim.lr_scheduler import ReduceLROnPlateau
+from torch.optim.lr_scheduler import ReduceLROnPlateau, OneCycleLR
 from tqdm.auto import tqdm
 
 from models.maskrcnn_model import (
@@ -23,6 +23,21 @@ from models.maskrcnn_model import (
 )
 from datasets.isaid_dataset import iSAIDDataset
 from training.transforms import get_transforms
+
+# Optional W&B import
+try:
+    from training.wandb_logger import (
+        WandbLogger,
+        WandbConfig,
+        compute_gradient_norms,
+        get_fixed_val_batch,
+        ISAID_CLASS_LABELS,
+    )
+    WANDB_AVAILABLE = True
+except ImportError:
+    WANDB_AVAILABLE = False
+    WandbLogger = None
+    WandbConfig = None
 
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
@@ -182,11 +197,43 @@ def create_datasets(
 
 class Trainer:
     """
-    Trainer class for Mask R-CNN models.
+    Trainer class for Mask R-CNN models with optional W&B integration.
 
     Can be initialized in two ways:
     1. With pre-created datasets and model (recommended for multiple runs)
     2. With data_root to create datasets internally (legacy mode)
+
+    W&B Integration:
+        Pass wandb_config to enable comprehensive W&B logging including:
+        - Training/validation losses and metrics
+        - Gradient norms for CBAM and RoI layers
+        - Learning rate tracking
+        - Validation image predictions visualization
+        - Model checkpointing as artifacts
+
+    Example usage with W&B:
+        # Create datasets and model
+        train_ds, val_ds = create_datasets("iSAID_patches", image_size=800)
+        model = CustomMaskRCNN(num_classes=16)
+
+        # Define hyperparameters (logged to W&B)
+        hyperparams = {
+            "learning_rate": 0.005,
+            "batch_size": 2,
+            "num_epochs": 50,
+            "backbone": "efficientnet_b0",
+        }
+
+        # Create trainer with W&B
+        trainer = Trainer(
+            train_dataset=train_ds,
+            val_dataset=val_ds,
+            model=model,
+            wandb_project="my-project",
+            wandb_tags=["experiment-1"],
+            hyperparameters=hyperparams,
+        )
+        trainer.fit(epochs=50)
 
     Example usage with external datasets and model:
         # Create datasets once
@@ -236,6 +283,16 @@ class Trainer:
         rpn_anchor_sizes: Optional[Tuple[Tuple[int, ...], ...]] = None,
         rpn_aspect_ratios: Optional[Tuple[Tuple[float, ...], ...]] = None,
         anchor_cache_path: str = "optimized_anchors.pt",
+        # W&B integration parameters
+        wandb_project: Optional[str] = None,
+        wandb_entity: Optional[str] = None,
+        wandb_run_name: Optional[str] = None,
+        wandb_tags: Optional[List[str]] = None,
+        wandb_notes: str = "",
+        wandb_log_freq: int = 20,
+        wandb_num_val_images: int = 4,
+        wandb_conf_threshold: float = 0.5,
+        hyperparameters: Optional[Dict[str, Any]] = None,
     ):
         """
         Initialize Trainer.
@@ -258,11 +315,29 @@ class Trainer:
             rpn_anchor_sizes: Custom anchor sizes (legacy)
             rpn_aspect_ratios: Custom aspect ratios (legacy)
             anchor_cache_path: Path to cache optimized anchors (legacy)
+            wandb_project: W&B project name (enables W&B logging if set)
+            wandb_entity: W&B entity/team name
+            wandb_run_name: W&B run name (auto-generated if None)
+            wandb_tags: List of tags for the W&B run
+            wandb_notes: Notes for the W&B run
+            wandb_log_freq: How often to log training metrics (every N steps)
+            wandb_num_val_images: Number of validation images to visualize
+            wandb_conf_threshold: Confidence threshold for prediction visualization
+            hyperparameters: Dictionary of hyperparameters to log to W&B
         """
         self.device = torch.device(device if torch.cuda.is_available() else "cpu")
         self.use_amp = use_amp and self.device.type == "cuda"
         self.batch_size = batch_size
         self.lr = lr
+        self.num_classes = num_classes
+        
+        # W&B logger (initialized later if wandb_project is provided)
+        self.wandb_logger = None  # Optional[WandbLogger]
+        self.wandb_project = wandb_project
+        self._global_step = 0
+        self._val_image_indices = None  # Optional[List[int]]
+        self._fixed_val_images = None  # Optional[List[torch.Tensor]]
+        self._fixed_val_targets = None  # Optional[List[Dict]]
 
         # Handle datasets
         if train_dataset is not None and val_dataset is not None:
@@ -344,27 +419,107 @@ class Trainer:
 
         # AMP scaler for training only (not used in LR finder)
         self.scaler = GradScaler(enabled=self.use_amp)
+        
+        # Scheduler type (set in _create_scheduler)
+        self._scheduler_type = "plateau"
 
         print(f"Device: {self.device}")
         print(f"AMP enabled: {self.use_amp}")
         print(f"Train samples: {len(self.train_dataset)}")
         print(f"Val samples: {len(self.val_dataset)}")
 
-    def _create_scheduler(self):
-        """Create ReduceLROnPlateau scheduler - steps only on validation loss."""
-        # ReduceLROnPlateau: reduces LR when validation loss plateaus
-        # - mode='min': reduce LR when metric stops decreasing
-        # - factor=0.5: halve the LR on plateau
-        # - patience=2: wait 2 epochs before reducing
-        # - threshold=1e-3: minimum change to qualify as improvement
-        self.scheduler = ReduceLROnPlateau(
-            self.optimizer,
-            mode="min",
-            factor=0.5,
-            patience=2,
-            threshold=1e-3,
+        # Initialize W&B if project is specified
+        if wandb_project is not None:
+            if not WANDB_AVAILABLE:
+                raise ImportError(
+                    "wandb is required for W&B logging. Install with: pip install wandb"
+                )
+            
+            # Build hyperparameters dict if not provided
+            if hyperparameters is None:
+                hyperparameters = {}
+            
+            # Add trainer config to hyperparameters
+            hyperparameters.update({
+                "batch_size": batch_size,
+                "learning_rate": lr,
+                "num_classes": num_classes,
+                "use_amp": use_amp,
+                "device": str(self.device),
+                "train_samples": len(self.train_dataset),
+                "val_samples": len(self.val_dataset),
+            })
+            
+            # Create W&B config
+            wandb_config = WandbConfig(
+                project=wandb_project,
+                entity=wandb_entity,
+                run_name=wandb_run_name,
+                tags=wandb_tags or [],
+                notes=wandb_notes,
+                log_freq=wandb_log_freq,
+                num_val_images=wandb_num_val_images,
+                conf_threshold=wandb_conf_threshold,
+            )
+            
+            # Initialize logger
+            self.wandb_logger = WandbLogger(wandb_config, hyperparameters)
+            
+            # Setup fixed validation images for consistent visualization
+            self._setup_validation_images(wandb_num_val_images)
+            
+            print(f"W&B logging enabled: {self.wandb_logger.run.url}")
+
+    def _setup_validation_images(self, num_images: int = 4):
+        """Setup fixed validation images for consistent W&B visualization."""
+        # Select evenly spaced indices from validation set
+        val_len = len(self.val_dataset)
+        step = max(1, val_len // num_images)
+        self._val_image_indices = [min(i * step, val_len - 1) for i in range(num_images)]
+        
+        if self.wandb_logger is not None:
+            self.wandb_logger.set_validation_images(self._val_image_indices)
+        
+        # Pre-load validation images
+        self._fixed_val_images, self._fixed_val_targets = get_fixed_val_batch(
+            self.val_dataset, self._val_image_indices, str(self.device)
         )
-        print("Using ReduceLROnPlateau scheduler (steps on validation loss)")
+        print(f"Selected {len(self._val_image_indices)} validation images for visualization")
+
+    def _create_scheduler(self, scheduler_type: str = "plateau", epochs: int = 20, max_lr: Optional[float] = None):
+        """Create learning rate scheduler.
+        
+        Args:
+            scheduler_type: Type of scheduler - "plateau" or "onecycle"
+            epochs: Number of training epochs (needed for OneCycleLR)
+            max_lr: Maximum learning rate for OneCycleLR
+        """
+        self._scheduler_type = scheduler_type
+        
+        if scheduler_type == "onecycle":
+            # OneCycleLR: warm up then anneal, good for fast convergence
+            total_steps = len(self.train_loader) * epochs
+            self.scheduler = OneCycleLR(
+                self.optimizer,
+                max_lr=max_lr or self.lr * 10,
+                total_steps=total_steps,
+                pct_start=0.1,
+            )
+            print(f"Using OneCycleLR scheduler (max_lr={max_lr or self.lr * 10:.2e}, total_steps={total_steps})")
+        else:
+            # ReduceLROnPlateau: reduces LR when validation loss plateaus
+            # - mode='min': reduce LR when metric stops decreasing
+            # - factor=0.5: halve the LR on plateau
+            # - patience=2: wait 2 epochs before reducing
+            # - threshold=1e-3: minimum change to qualify as improvement
+            self.scheduler = ReduceLROnPlateau(
+                self.optimizer,
+                mode="min",
+                factor=0.5,
+                patience=2,
+                threshold=1e-3,
+            )
+            print("Using ReduceLROnPlateau scheduler (steps on validation loss)")
 
     def find_lr(
         self,
@@ -854,12 +1009,35 @@ class Trainer:
                 for k, v in loss_dict.items():
                     loss_accumulator.setdefault(k, 0.0)
                     loss_accumulator[k] += v.item()
+                
+                # =========================================================
+                # W&B LOGGING: Training step metrics
+                # =========================================================
+                if self.wandb_logger is not None:
+                    current_lr = self.get_lr()
+                    
+                    # Log training metrics
+                    self.wandb_logger.log_training_step(
+                        loss_dict=loss_dict,
+                        learning_rate=current_lr,
+                        step=self._global_step,
+                        epoch=epoch,
+                    )
+                    
+                    # Log gradient norms for CBAM and RoI layers
+                    self.wandb_logger.log_gradient_norms(self.model, step=self._global_step)
+                
+                self._global_step += 1
+                
+                # Step OneCycleLR scheduler per batch (if using)
+                if self.scheduler is not None and self._scheduler_type == "onecycle":
+                    self.scheduler.step()
+                
                 # Show all losses in pbar with current LR
                 loss_postfix = {k: f"{v.item():.4f}" for k, v in loss_dict.items()}
                 loss_postfix["total"] = f"{loss_value:.4f}"
                 loss_postfix["lr"] = f"{self.get_lr():.2e}"
                 pbar.set_postfix(loss=loss_postfix)
-                # Note: scheduler steps only on validation loss, not per-batch
 
             except RuntimeError as e:
                 print(f"Warning: RuntimeError in batch: {e}, skipping")
@@ -968,9 +1146,11 @@ class Trainer:
         find_lr_first=False,
         compute_metrics_every: int = 1,
         max_map_samples: int = None,
+        scheduler_type: str = "plateau",
+        max_lr: Optional[float] = None,
     ) -> Dict[str, List[float]]:
         """
-        Train the model.
+        Train the model with optional W&B logging.
 
         Args:
             epochs: Number of epochs to train
@@ -978,6 +1158,8 @@ class Trainer:
             find_lr_first: If True, run LR finder before training
             compute_metrics_every: Compute mAP metrics every N epochs (default=1)
             max_map_samples: Max samples for mAP computation (None=all, use smaller for speed)
+            scheduler_type: "plateau" for ReduceLROnPlateau, "onecycle" for OneCycleLR
+            max_lr: Maximum learning rate for OneCycleLR scheduler
 
         Returns:
             history: Dictionary of metric lists, compatible with TensorBoard logging.
@@ -1006,16 +1188,24 @@ class Trainer:
             suggested_lr = self.find_lr()
             self.set_lr(suggested_lr)
 
-        # Create ReduceLROnPlateau scheduler
-        self._create_scheduler()
+        # Create scheduler
+        self._create_scheduler(scheduler_type=scheduler_type, epochs=epochs, max_lr=max_lr)
 
         best_loss = float("inf")
         best_map = 0.0
+
+        # Update W&B logger epoch tracking
+        if self.wandb_logger is not None:
+            self.wandb_logger.epoch = 0
 
         for epoch in range(1, epochs + 1):
             print(f"\n{'=' * 60}")
             print(f"Epoch {epoch}/{epochs} | LR: {self.get_lr():.2e}")
             print(f"{'=' * 60}")
+
+            # Update W&B logger epoch
+            if self.wandb_logger is not None:
+                self.wandb_logger.epoch = epoch
 
             start = time.time()
 
@@ -1070,6 +1260,26 @@ class Trainer:
             history["train_val/mAP_gap"].append(map_gap)
             history["train/lr"].append(self.get_lr())
 
+            # =========================================================
+            # W&B LOGGING: Epoch-level validation metrics
+            # =========================================================
+            if self.wandb_logger is not None:
+                # Log validation loss and metrics
+                val_metrics = {
+                    "mAP@0.5": val_map,
+                    "mean_iou": val_mean_iou,
+                    "train_mAP@0.5": train_map,
+                    "mAP_gap": map_gap,
+                }
+                self.wandb_logger.log_validation_metrics(
+                    val_loss=val_losses["total"],
+                    val_metrics=val_metrics,
+                    epoch=epoch,
+                )
+                
+                # Log validation predictions visualization
+                self._log_validation_predictions(epoch)
+
             # Print detailed results
             print(f"\nEpoch {epoch} Results (Time: {epoch_time:.1f}s):")
             print(f"  Losses:")
@@ -1090,8 +1300,8 @@ class Trainer:
 
             val_loss = val_losses["total"]
 
-            # Step ReduceLROnPlateau scheduler with validation loss
-            if self.scheduler is not None:
+            # Step ReduceLROnPlateau scheduler with validation loss (OneCycleLR steps per batch)
+            if self.scheduler is not None and self._scheduler_type == "plateau":
                 self.scheduler.step(val_loss)
 
             self.save_checkpoint(f"{save_dir}/last.pth", epoch, val_loss)
@@ -1099,8 +1309,13 @@ class Trainer:
             # Save best model based on validation loss
             if val_loss < best_loss:
                 best_loss = val_loss
-                self.save_checkpoint(f"{save_dir}/best.pth", epoch, val_loss)
+                best_model_path = f"{save_dir}/best.pth"
+                self.save_checkpoint(best_model_path, epoch, val_loss)
                 print("-> New best model saved (by loss)")
+                
+                # Log best model as W&B artifact
+                if self.wandb_logger is not None:
+                    self.wandb_logger.log_best_model(best_model_path, val_loss, val_map)
 
             # Also track best mAP
             if val_map > best_map:
@@ -1118,6 +1333,49 @@ class Trainer:
         print(f"{'=' * 60}")
 
         return history
+    
+    @torch.no_grad()
+    def _log_validation_predictions(self, epoch: int):
+        """Log validation predictions to W&B."""
+        if self.wandb_logger is None or self._fixed_val_images is None:
+            return
+        
+        self.model.eval()
+        
+        # Get predictions on fixed validation images
+        val_images_device = [img.to(self.device) for img in self._fixed_val_images]
+        predictions = self.model(val_images_device)
+        
+        # Move predictions back to CPU for logging
+        predictions_cpu = [
+            {k: v.cpu() for k, v in pred.items()}
+            for pred in predictions
+        ]
+        
+        # Log visualization
+        self.wandb_logger.log_validation_predictions(
+            images=self._fixed_val_images,
+            targets=self._fixed_val_targets,
+            predictions=predictions_cpu,
+            epoch=epoch,
+        )
+        
+        self.model.train()
+
+    def finish(self):
+        """Finish the W&B run and clean up resources."""
+        if self.wandb_logger is not None:
+            self.wandb_logger.finish()
+            print("W&B run finished.")
+    
+    def __enter__(self):
+        """Context manager entry."""
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Context manager exit - ensures W&B run is finished."""
+        self.finish()
+        return False
 
     @torch.no_grad()
     def visualize_predictions(
