@@ -13,7 +13,7 @@ from typing import Optional, Tuple, Union, Dict, List, Any
 import torch
 from torch.utils.data import DataLoader, Subset, Dataset
 from torch.amp import GradScaler, autocast
-from torch.optim.lr_scheduler import ReduceLROnPlateau, OneCycleLR
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 from tqdm.auto import tqdm
 
 from models.maskrcnn_model import (
@@ -486,40 +486,21 @@ class Trainer:
         )
         print(f"Selected {len(self._val_image_indices)} validation images for visualization")
 
-    def _create_scheduler(self, scheduler_type: str = "plateau", epochs: int = 20, max_lr: Optional[float] = None):
-        """Create learning rate scheduler.
-        
-        Args:
-            scheduler_type: Type of scheduler - "plateau" or "onecycle"
-            epochs: Number of training epochs (needed for OneCycleLR)
-            max_lr: Maximum learning rate for OneCycleLR
-        """
-        self._scheduler_type = scheduler_type
-        
-        if scheduler_type == "onecycle":
-            # OneCycleLR: warm up then anneal, good for fast convergence
-            total_steps = len(self.train_loader) * epochs
-            self.scheduler = OneCycleLR(
-                self.optimizer,
-                max_lr=max_lr or self.lr * 10,
-                total_steps=total_steps,
-                pct_start=0.1,
-            )
-            print(f"Using OneCycleLR scheduler (max_lr={max_lr or self.lr * 10:.2e}, total_steps={total_steps})")
-        else:
-            # ReduceLROnPlateau: reduces LR when validation loss plateaus
-            # - mode='min': reduce LR when metric stops decreasing
-            # - factor=0.5: halve the LR on plateau
-            # - patience=2: wait 2 epochs before reducing
-            # - threshold=1e-3: minimum change to qualify as improvement
-            self.scheduler = ReduceLROnPlateau(
-                self.optimizer,
-                mode="min",
-                factor=0.5,
-                patience=2,
-                threshold=1e-3,
-            )
-            print("Using ReduceLROnPlateau scheduler (steps on validation loss)")
+    def _create_scheduler(self):
+        """Create ReduceLROnPlateau learning rate scheduler."""
+        # ReduceLROnPlateau: reduces LR when validation loss plateaus
+        # - mode='min': reduce LR when metric stops decreasing
+        # - factor=0.5: halve the LR on plateau
+        # - patience=2: wait 2 epochs before reducing
+        # - threshold=1e-3: minimum change to qualify as improvement
+        self.scheduler = ReduceLROnPlateau(
+            self.optimizer,
+            mode="min",
+            factor=0.5,
+            patience=2,
+            threshold=1e-3,
+        )
+        print("Using ReduceLROnPlateau scheduler (steps on validation loss)")
 
     def find_lr(
         self,
@@ -1019,10 +1000,6 @@ class Trainer:
                 
                 self._global_step += 1
                 
-                # Step OneCycleLR scheduler per batch (if using)
-                if self.scheduler is not None and self._scheduler_type == "onecycle":
-                    self.scheduler.step()
-                
                 # Show all losses in pbar with current LR
                 loss_postfix = {k: f"{v.item():.4f}" for k, v in loss_dict.items()}
                 loss_postfix["total"] = f"{loss_value:.4f}"
@@ -1136,8 +1113,6 @@ class Trainer:
         find_lr_first=False,
         compute_metrics_every: int = 1,
         max_map_samples: int = None,
-        scheduler_type: str = "plateau",
-        max_lr: Optional[float] = None,
     ) -> Dict[str, List[float]]:
         """
         Train the model with optional W&B logging.
@@ -1148,8 +1123,6 @@ class Trainer:
             find_lr_first: If True, run LR finder before training
             compute_metrics_every: Compute mAP metrics every N epochs (default=1)
             max_map_samples: Max samples for mAP computation (None=all, use smaller for speed)
-            scheduler_type: "plateau" for ReduceLROnPlateau, "onecycle" for OneCycleLR
-            max_lr: Maximum learning rate for OneCycleLR scheduler
 
         Returns:
             history: Dictionary of metric lists, compatible with TensorBoard logging.
@@ -1179,7 +1152,7 @@ class Trainer:
             self.set_lr(suggested_lr)
 
         # Create scheduler
-        self._create_scheduler(scheduler_type=scheduler_type, epochs=epochs, max_lr=max_lr)
+        self._create_scheduler()
 
         best_loss = float("inf")
         best_map = 0.0
@@ -1290,8 +1263,8 @@ class Trainer:
 
             val_loss = val_losses["total"]
 
-            # Step ReduceLROnPlateau scheduler with validation loss (OneCycleLR steps per batch)
-            if self.scheduler is not None and self._scheduler_type == "plateau":
+            # Step ReduceLROnPlateau scheduler with validation loss
+            if self.scheduler is not None:
                 self.scheduler.step(val_loss)
 
             self.save_checkpoint(f"{save_dir}/last.pth", epoch, val_loss)
