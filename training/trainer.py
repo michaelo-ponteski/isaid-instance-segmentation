@@ -951,7 +951,7 @@ class Trainer:
                     # Check for NaN/Inf before backward
                     if not torch.isfinite(loss):
                         print(f"Warning: NaN/Inf loss detected, skipping batch")
-                        self.scaler.update()  # Still update scaler to prevent stall
+                        self.optimizer.zero_grad(set_to_none=True)
                         del images, targets, loss, loss_dict
                         torch.cuda.empty_cache()
                         continue
