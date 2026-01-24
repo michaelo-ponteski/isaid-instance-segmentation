@@ -270,6 +270,7 @@ class Trainer:
         num_classes: int = 16,
         # Training parameters
         batch_size: int = 2,
+        val_batch_size: int = 1,
         lr: float = 0.0001,
         device: str = "cuda",
         use_amp: bool = True,
@@ -330,7 +331,8 @@ class Trainer:
         self.batch_size = batch_size
         self.lr = lr
         self.num_classes = num_classes
-        
+        self.val_batch_size = val_batch_size
+
         # W&B logger (initialized later if wandb_project is provided)
         self.wandb_logger = None  # Optional[WandbLogger]
         self.wandb_project = wandb_project
@@ -372,7 +374,7 @@ class Trainer:
         # Use num_workers=0 for validation to avoid multiprocessing issues in notebooks
         self.val_loader = DataLoader(
             self.val_dataset,
-            batch_size=1,
+            batch_size=val_batch_size,
             shuffle=False,
             num_workers=0,
             collate_fn=collate_fn,
@@ -419,7 +421,7 @@ class Trainer:
 
         # AMP scaler for training only (not used in LR finder)
         self.scaler = GradScaler(enabled=self.use_amp)
-        
+
         # Scheduler type (set in _create_scheduler)
         self._scheduler_type = "plateau"
 
@@ -434,11 +436,11 @@ class Trainer:
                 raise ImportError(
                     "wandb is required for W&B logging. Install with: pip install wandb"
                 )
-            
+
             # Build hyperparameters dict if not provided
             if hyperparameters is None:
                 hyperparameters = {}
-            
+
             # Add trainer config to hyperparameters
             hyperparameters.update({
                 "batch_size": batch_size,
@@ -449,7 +451,7 @@ class Trainer:
                 "train_samples": len(self.train_dataset),
                 "val_samples": len(self.val_dataset),
             })
-            
+
             # Create W&B config
             wandb_config = WandbConfig(
                 project=wandb_project,
@@ -461,13 +463,13 @@ class Trainer:
                 num_val_images=wandb_num_val_images,
                 conf_threshold=wandb_conf_threshold,
             )
-            
+
             # Initialize logger
             self.wandb_logger = WandbLogger(wandb_config, hyperparameters)
-            
+
             # Setup fixed validation images for consistent visualization
             self._setup_validation_images(wandb_num_val_images)
-            
+
             print(f"W&B logging enabled: {self.wandb_logger.run.url}")
 
     def _setup_validation_images(self, num_images: int = 4):
@@ -476,10 +478,10 @@ class Trainer:
         val_len = len(self.val_dataset)
         step = max(1, val_len // num_images)
         self._val_image_indices = [min(i * step, val_len - 1) for i in range(num_images)]
-        
+
         if self.wandb_logger is not None:
             self.wandb_logger.set_validation_images(self._val_image_indices)
-        
+
         # Pre-load validation images
         self._fixed_val_images, self._fixed_val_targets = get_fixed_val_batch(
             self.val_dataset, self._val_image_indices, str(self.device)
@@ -772,7 +774,7 @@ class Trainer:
                     if pred_mask.any():
                         boxes = pred_boxes[pred_mask]
                         scores_cls = pred_scores[pred_mask]
-                        
+
                         # Only add if under limit, or if scores are high enough
                         data = class_data[label_id]
                         if data["n_preds"] < max_preds_per_class:
@@ -786,7 +788,7 @@ class Trainer:
                         class_data[label_id]["n_gts"] += gt_mask.sum()
 
             num_samples += len(images)
-            
+
             # Clear references
             del images, predictions
 
@@ -794,7 +796,7 @@ class Trainer:
         aps = []
         for label_id in list(class_data.keys()):
             data = class_data[label_id]
-            
+
             if data["pred_boxes"]:
                 all_pred_boxes = np.concatenate(data["pred_boxes"])
                 all_pred_scores = np.concatenate(data["pred_scores"])
@@ -980,13 +982,13 @@ class Trainer:
                 for k, v in loss_dict.items():
                     loss_accumulator.setdefault(k, 0.0)
                     loss_accumulator[k] += v.item()
-                
+
                 # =========================================================
                 # W&B LOGGING: Training step metrics
                 # =========================================================
                 if self.wandb_logger is not None:
                     current_lr = self.get_lr()
-                    
+
                     # Log training metrics
                     self.wandb_logger.log_training_step(
                         loss_dict=loss_dict,
@@ -994,12 +996,12 @@ class Trainer:
                         step=self._global_step,
                         epoch=epoch,
                     )
-                    
+
                     # Log gradient norms for CBAM and RoI layers
                     self.wandb_logger.log_gradient_norms(self.model, step=self._global_step)
-                
+
                 self._global_step += 1
-                
+
                 # Show all losses in pbar with current LR
                 loss_postfix = {k: f"{v.item():.4f}" for k, v in loss_dict.items()}
                 loss_postfix["total"] = f"{loss_value:.4f}"
@@ -1239,7 +1241,7 @@ class Trainer:
                     val_metrics=val_metrics,
                     epoch=epoch,
                 )
-                
+
                 # Log validation predictions visualization
                 self._log_validation_predictions(epoch)
 
@@ -1275,7 +1277,7 @@ class Trainer:
                 best_model_path = f"{save_dir}/best.pth"
                 self.save_checkpoint(best_model_path, epoch, val_loss)
                 print("-> New best model saved (by loss)")
-                
+
                 # Log best model as W&B artifact
                 if self.wandb_logger is not None:
                     self.wandb_logger.log_best_model(best_model_path, val_loss, val_map)
@@ -1296,25 +1298,25 @@ class Trainer:
         print(f"{'=' * 60}")
 
         return history
-    
+
     @torch.no_grad()
     def _log_validation_predictions(self, epoch: int):
         """Log validation predictions to W&B."""
         if self.wandb_logger is None or self._fixed_val_images is None:
             return
-        
+
         self.model.eval()
-        
+
         # Get predictions on fixed validation images
         val_images_device = [img.to(self.device) for img in self._fixed_val_images]
         predictions = self.model(val_images_device)
-        
+
         # Move predictions back to CPU for logging
         predictions_cpu = [
             {k: v.cpu() for k, v in pred.items()}
             for pred in predictions
         ]
-        
+
         # Log visualization
         self.wandb_logger.log_validation_predictions(
             images=self._fixed_val_images,
@@ -1322,7 +1324,7 @@ class Trainer:
             predictions=predictions_cpu,
             epoch=epoch,
         )
-        
+
         self.model.train()
 
     def finish(self):
@@ -1330,11 +1332,11 @@ class Trainer:
         if self.wandb_logger is not None:
             self.wandb_logger.finish()
             print("W&B run finished.")
-    
+
     def __enter__(self):
         """Context manager entry."""
         return self
-    
+
     def __exit__(self, exc_type, exc_val, exc_tb):
         """Context manager exit - ensures W&B run is finished."""
         self.finish()
