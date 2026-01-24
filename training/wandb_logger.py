@@ -552,7 +552,10 @@ def create_wandb_image(
     class_labels: Dict[int, str] = None,
 ) -> wandb.Image:
     """
-    Create a W&B Image with ground truth and prediction masks.
+    Create a W&B Image with instance segmentation masks properly formatted.
+    
+    This function formats predictions for W&B's instance segmentation viewer,
+    binding each mask to its corresponding bounding box for proper visualization.
     
     Args:
         image: Image tensor [C, H, W]
@@ -562,7 +565,7 @@ def create_wandb_image(
         class_labels: Dictionary mapping class IDs to names
         
     Returns:
-        wandb.Image with masks overlay
+        wandb.Image with instance segmentation masks bound to boxes
     """
     if class_labels is None:
         class_labels = ISAID_CLASS_LABELS
@@ -571,92 +574,129 @@ def create_wandb_image(
     img_np = denormalize_image(image)
     height, width = img_np.shape[:2]
     
-    # Create ground truth mask
-    gt_masks = target.get("masks", torch.tensor([]))
-    gt_labels = target.get("labels", torch.tensor([]))
-    gt_mask = create_instance_mask(gt_masks, gt_labels, height, width)
-    
-    # Filter predictions by confidence
-    pred_scores = prediction.get("scores", torch.tensor([]))
-    if len(pred_scores) > 0:
-        keep = pred_scores > conf_threshold
-        pred_masks = prediction.get("masks", torch.tensor([]))[keep]
-        pred_labels = prediction.get("labels", torch.tensor([]))[keep]
-    else:
-        pred_masks = torch.tensor([])
-        pred_labels = torch.tensor([])
-    
-    pred_mask = create_instance_mask(pred_masks, pred_labels, height, width)
-    
-    # Create wandb image with masks
-    masks_dict = {}
-    
-    if gt_mask.any():
-        masks_dict["ground_truth"] = {
-            "mask_data": gt_mask,
-            "class_labels": class_labels,
-        }
-    
-    if pred_mask.any():
-        masks_dict["predictions"] = {
-            "mask_data": pred_mask,
-            "class_labels": class_labels,
-        }
-    
-    # Create boxes annotations for wandb
-    boxes_data = []
-    
-    # Ground truth boxes
+    # =========================================================================
+    # Format GROUND TRUTH boxes with instance masks
+    # =========================================================================
+    gt_boxes_data = []
     gt_boxes = target.get("boxes", torch.tensor([]))
-    if len(gt_boxes) > 0:
-        for box, label in zip(gt_boxes.cpu().numpy(), gt_labels.cpu().numpy()):
-            x1, y1, x2, y2 = box
-            boxes_data.append({
-                "position": {
-                    "minX": float(x1) / width,
-                    "maxX": float(x2) / width,
-                    "minY": float(y1) / height,
-                    "maxY": float(y2) / height,
-                },
-                "class_id": int(label),
-                "box_caption": f"GT: {class_labels.get(int(label), f'Class {label}')}",
-                "domain": "pixel",
-            })
+    gt_labels = target.get("labels", torch.tensor([]))
+    gt_masks = target.get("masks", torch.tensor([]))
     
-    # Prediction boxes
-    pred_boxes = prediction.get("boxes", torch.tensor([]))
-    if len(pred_scores) > 0:
-        pred_boxes = pred_boxes[keep]
-        pred_scores_filtered = pred_scores[keep]
+    if len(gt_boxes) > 0:
+        gt_boxes_np = gt_boxes.cpu().numpy()
+        gt_labels_np = gt_labels.cpu().numpy()
+        gt_masks_np = gt_masks.cpu().numpy() if len(gt_masks) > 0 else None
         
-        for box, label, score in zip(
-            pred_boxes.cpu().numpy(),
-            pred_labels.cpu().numpy(),
-            pred_scores_filtered.cpu().numpy()
-        ):
-            x1, y1, x2, y2 = box
-            boxes_data.append({
+        # Handle mask shape: [N, H, W] or [N, 1, H, W]
+        if gt_masks_np is not None and gt_masks_np.ndim == 4:
+            gt_masks_np = gt_masks_np.squeeze(1)  # [N, 1, H, W] -> [N, H, W]
+        
+        for i in range(len(gt_boxes_np)):
+            box = gt_boxes_np[i]
+            label = int(gt_labels_np[i])
+            
+            box_item = {
                 "position": {
-                    "minX": float(x1) / width,
-                    "maxX": float(x2) / width,
-                    "minY": float(y1) / height,
-                    "maxY": float(y2) / height,
+                    "minX": float(box[0]),
+                    "minY": float(box[1]),
+                    "maxX": float(box[2]),
+                    "maxY": float(box[3]),
                 },
-                "class_id": int(label),
-                "box_caption": f"Pred: {class_labels.get(int(label), f'Class {label}')} ({score:.2f})",
-                "domain": "pixel",
-                "scores": {"confidence": float(score)},
-            })
+                "class_id": label,
+                "box_caption": f"{class_labels.get(label, f'Class {label}')}",
+            }
+            
+            # Bind mask to this specific instance
+            if gt_masks_np is not None and i < len(gt_masks_np):
+                mask = gt_masks_np[i]
+                # Resize mask if needed
+                if mask.shape != (height, width):
+                    from PIL import Image as PILImage
+                    mask_pil = PILImage.fromarray((mask > 0.5).astype(np.uint8) * 255)
+                    mask_pil = mask_pil.resize((width, height), PILImage.NEAREST)
+                    mask = (np.array(mask_pil) > 128).astype(np.uint8)
+                else:
+                    mask = (mask > 0.5).astype(np.uint8)
+                box_item["mask_data"] = mask
+            
+            gt_boxes_data.append(box_item)
+    
+    # =========================================================================
+    # Format PREDICTION boxes with instance masks
+    # =========================================================================
+    pred_boxes_data = []
+    pred_scores = prediction.get("scores", torch.tensor([]))
+    
+    if len(pred_scores) > 0:
+        # Filter by confidence threshold
+        keep = pred_scores > conf_threshold
+        
+        pred_boxes = prediction.get("boxes", torch.tensor([]))[keep].cpu().numpy()
+        pred_labels = prediction.get("labels", torch.tensor([]))[keep].cpu().numpy()
+        pred_scores_filtered = pred_scores[keep].cpu().numpy()
+        pred_masks = prediction.get("masks", torch.tensor([]))
+        
+        if len(pred_masks) > 0:
+            pred_masks_np = pred_masks[keep].cpu().numpy()
+            # Handle mask shape: [N, 1, H, W] -> [N, H, W]
+            if pred_masks_np.ndim == 4:
+                pred_masks_np = pred_masks_np.squeeze(1)
+        else:
+            pred_masks_np = None
+        
+        for i in range(len(pred_boxes)):
+            box = pred_boxes[i]
+            label = int(pred_labels[i])
+            score = float(pred_scores_filtered[i])
+            
+            box_item = {
+                "position": {
+                    "minX": float(box[0]),
+                    "minY": float(box[1]),
+                    "maxX": float(box[2]),
+                    "maxY": float(box[3]),
+                },
+                "class_id": label,
+                "box_caption": f"{class_labels.get(label, f'Class {label}')} {score:.2f}",
+                "scores": {"confidence": score},
+            }
+            
+            # Bind mask to this specific instance (W&B instance segmentation format)
+            if pred_masks_np is not None and i < len(pred_masks_np):
+                mask = pred_masks_np[i]
+                # Resize mask if needed
+                if mask.shape != (height, width):
+                    from PIL import Image as PILImage
+                    mask_pil = PILImage.fromarray((mask > 0.5).astype(np.uint8) * 255)
+                    mask_pil = mask_pil.resize((width, height), PILImage.NEAREST)
+                    mask = (np.array(mask_pil) > 128).astype(np.uint8)
+                else:
+                    # Binarize the mask (W&B needs 0 or 1)
+                    mask = (mask > 0.5).astype(np.uint8)
+                box_item["mask_data"] = mask
+            
+            pred_boxes_data.append(box_item)
+    
+    # =========================================================================
+    # Create W&B Image with boxes (instance masks bound to boxes)
+    # =========================================================================
+    boxes_dict = {}
+    
+    if gt_boxes_data:
+        boxes_dict["ground_truth"] = {
+            "box_data": gt_boxes_data,
+            "class_labels": class_labels,
+        }
+    
+    if pred_boxes_data:
+        boxes_dict["predictions"] = {
+            "box_data": pred_boxes_data,
+            "class_labels": class_labels,
+        }
     
     return wandb.Image(
         img_np,
-        masks=masks_dict if masks_dict else None,
-        boxes={
-            "predictions": {
-                "box_data": boxes_data,
-                "class_labels": class_labels,
-            }
-        } if boxes_data else None,
+        boxes=boxes_dict if boxes_dict else None,
     )
 
 
