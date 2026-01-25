@@ -602,6 +602,7 @@ def create_wandb_image(
                     "maxX": float(box[2]),
                     "maxY": float(box[3]),
                 },
+                "domain": "pixel",
                 "class_id": label,
                 "box_caption": f"{class_labels.get(label, f'Class {label}')}",
             }
@@ -656,6 +657,7 @@ def create_wandb_image(
                     "maxX": float(box[2]),
                     "maxY": float(box[3]),
                 },
+                "domain": "pixel",
                 "class_id": label,
                 "box_caption": f"{class_labels.get(label, f'Class {label}')} {score:.2f}",
                 "scores": {"confidence": score},
