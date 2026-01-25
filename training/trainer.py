@@ -33,6 +33,7 @@ try:
         get_fixed_val_batch,
         ISAID_CLASS_LABELS,
     )
+
     WANDB_AVAILABLE = True
 except ImportError:
     WANDB_AVAILABLE = False
@@ -154,7 +155,7 @@ def create_datasets(
 
     This is a helper function to create datasets once and reuse them
     across multiple training runs with different models/backbones.
-    
+
     Filtering is applied BEFORE training to:
     - Remove outlier images with extreme box counts (prevents RAM/VRAM spikes)
     - Control the fraction of empty images (prevents empty-dominated batches)
@@ -461,15 +462,17 @@ class Trainer:
                 hyperparameters = {}
 
             # Add trainer config to hyperparameters
-            hyperparameters.update({
-                "batch_size": batch_size,
-                "learning_rate": lr,
-                "num_classes": num_classes,
-                "use_amp": use_amp,
-                "device": str(self.device),
-                "train_samples": len(self.train_dataset),
-                "val_samples": len(self.val_dataset),
-            })
+            hyperparameters.update(
+                {
+                    "batch_size": batch_size,
+                    "learning_rate": lr,
+                    "num_classes": num_classes,
+                    "use_amp": use_amp,
+                    "device": str(self.device),
+                    "train_samples": len(self.train_dataset),
+                    "val_samples": len(self.val_dataset),
+                }
+            )
 
             # Create W&B config
             wandb_config = WandbConfig(
@@ -496,7 +499,9 @@ class Trainer:
         # Select evenly spaced indices from validation set
         val_len = len(self.val_dataset)
         step = max(1, val_len // num_images)
-        self._val_image_indices = [min(i * step, val_len - 1) for i in range(num_images)]
+        self._val_image_indices = [
+            min(i * step, val_len - 1) for i in range(num_images)
+        ]
 
         if self.wandb_logger is not None:
             self.wandb_logger.set_validation_images(self._val_image_indices)
@@ -505,7 +510,9 @@ class Trainer:
         self._fixed_val_images, self._fixed_val_targets = get_fixed_val_batch(
             self.val_dataset, self._val_image_indices, str(self.device)
         )
-        print(f"Selected {len(self._val_image_indices)} validation images for visualization")
+        print(
+            f"Selected {len(self._val_image_indices)} validation images for visualization"
+        )
 
     def _create_scheduler(self):
         """Create ReduceLROnPlateau learning rate scheduler."""
@@ -785,8 +792,11 @@ class Trainer:
                 for label_id in all_labels:
                     if label_id not in class_data:
                         class_data[label_id] = {
-                            "pred_boxes": [], "pred_scores": [], "gt_boxes": [],
-                            "n_preds": 0, "n_gts": 0
+                            "pred_boxes": [],
+                            "pred_scores": [],
+                            "gt_boxes": [],
+                            "n_preds": 0,
+                            "n_gts": 0,
                         }
 
                     pred_mask = pred_labels == label_id
@@ -828,7 +838,9 @@ class Trainer:
             else:
                 all_gt_boxes = np.zeros((0, 4), dtype=np.float32)
 
-            ap = self._compute_ap_numpy(all_pred_boxes, all_pred_scores, all_gt_boxes, iou_threshold)
+            ap = self._compute_ap_numpy(
+                all_pred_boxes, all_pred_scores, all_gt_boxes, iou_threshold
+            )
             aps.append(ap)
 
             # Free memory immediately after each class
@@ -1017,7 +1029,9 @@ class Trainer:
                     )
 
                     # Log gradient norms for CBAM and RoI layers
-                    self.wandb_logger.log_gradient_norms(self.model, step=self._global_step)
+                    self.wandb_logger.log_gradient_norms(
+                        self.model, step=self._global_step
+                    )
 
                 self._global_step += 1
 
@@ -1155,7 +1169,7 @@ class Trainer:
         Returns:
             history: Dictionary of metric lists, compatible with TensorBoard logging.
                 Keys follow convention: 'train/<metric>', 'val/<metric>', 'train_val/<metric>'
-        
+
         Early Stopping Logic (mAP gap):
             The train-val mAP gap indicates overfitting when positive (train >> val).
             We stop training if the gap doesn't decrease (improve) for `early_stop_gap_patience` epochs.
@@ -1189,10 +1203,11 @@ class Trainer:
 
         best_loss = float("inf")
         best_map = 0.0
-        
+
         # Early stopping state (mAP gap based)
-        # We want the gap to DECREASE (closer to 0 or negative = less overfitting)
-        best_gap = float("inf")
+        # We want the ABSOLUTE gap to DECREASE (closer to 0 = better alignment)
+        # Gap can be positive (overfitting) or negative (underfitting)
+        best_gap_abs = float("inf")
         gap_patience_counter = 0
 
         # Update W&B logger epoch tracking
@@ -1325,27 +1340,38 @@ class Trainer:
                 print(f"-> New best mAP@0.5: {best_map:.4f}")
 
             # =========================================================
-            # EARLY STOPPING: Based on train-val mAP gap
+            # EARLY STOPPING: Based on train-val mAP gap (DISABLED BY DEFAULT)
             # =========================================================
-            # The gap should ideally decrease (less overfitting) or stay stable.
-            # If it keeps increasing for too long, we're overfitting without
-            # improving validation performance.
-            if early_stop_gap_patience is not None and epoch % compute_metrics_every == 0:
-                # Check if gap improved (decreased) by at least threshold
-                if map_gap < best_gap - early_stop_gap_threshold:
-                    best_gap = map_gap
+            # The absolute gap should ideally decrease (train and val closer together).
+            # Gap can be positive (train > val = overfitting) or negative (val > train).
+            # We want |gap| to decrease, meaning better alignment between train and val.
+            if (
+                early_stop_gap_patience is not None
+                and epoch % compute_metrics_every == 0
+            ):
+                gap_abs = abs(map_gap)
+                # Check if absolute gap improved (decreased) by at least threshold
+                if gap_abs < best_gap_abs - early_stop_gap_threshold:
+                    best_gap_abs = gap_abs
                     gap_patience_counter = 0
-                    print(f"-> mAP gap improved to {map_gap:+.4f}")
+                    print(f"-> mAP gap improved: |{map_gap:+.4f}| = {gap_abs:.4f}")
                 else:
                     gap_patience_counter += 1
-                    print(f"-> mAP gap patience: {gap_patience_counter}/{early_stop_gap_patience}")
-                
+                    print(
+                        f"-> mAP gap patience: {gap_patience_counter}/{early_stop_gap_patience} (|gap|={gap_abs:.4f})"
+                    )
+
                 # Check if we should stop
                 if gap_patience_counter >= early_stop_gap_patience:
                     print(f"\n{'=' * 60}")
-                    print(f"EARLY STOPPING: mAP gap not improving for {early_stop_gap_patience} epochs")
-                    print(f"  Current gap: {map_gap:+.4f}, Best gap: {best_gap:+.4f}")
-                    print(f"  This indicates persistent overfitting without validation improvement.")
+                    print(
+                        f"EARLY STOPPING: mAP gap not improving for {early_stop_gap_patience} epochs"
+                    )
+                    print(f"  Current gap: {map_gap:+.4f} (|gap|={gap_abs:.4f})")
+                    print(f"  Best |gap|: {best_gap_abs:.4f}")
+                    print(
+                        f"  Train and val performance are not converging - consider stopping."
+                    )
                     print(f"{'=' * 60}")
                     break
 
@@ -1354,7 +1380,7 @@ class Trainer:
 
         # Determine if training completed normally or was stopped early
         stopped_early = (
-            early_stop_gap_patience is not None 
+            early_stop_gap_patience is not None
             and gap_patience_counter >= early_stop_gap_patience
         )
 
@@ -1366,7 +1392,7 @@ class Trainer:
         print(f"  Best val loss: {best_loss:.4f}")
         print(f"  Best val mAP@0.5: {best_map:.4f}")
         if early_stop_gap_patience is not None:
-            print(f"  Best mAP gap: {best_gap:+.4f}")
+            print(f"  Best |mAP gap|: {best_gap_abs:.4f}")
         print(f"{'=' * 60}")
 
         return history
@@ -1385,8 +1411,7 @@ class Trainer:
 
         # Move predictions back to CPU for logging
         predictions_cpu = [
-            {k: v.cpu() for k, v in pred.items()}
-            for pred in predictions
+            {k: v.cpu() for k, v in pred.items()} for pred in predictions
         ]
 
         # Log visualization

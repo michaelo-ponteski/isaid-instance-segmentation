@@ -35,9 +35,9 @@ class iSAIDDataset(Dataset):
         augment=None,
         # === NEW: Outlier filtering parameters ===
         max_boxes_per_image=400,  # Images with more boxes are excluded
-        max_empty_fraction=0.3,   # Max fraction of images with 0 boxes (0.3 = 30%)
-        filter_seed=42,           # Seed for deterministic empty image sampling
-        verbose=True,             # Print dataset statistics report
+        max_empty_fraction=0.3,  # Max fraction of images with 0 boxes (0.3 = 30%)
+        filter_seed=42,  # Seed for deterministic empty image sampling
+        verbose=True,  # Print dataset statistics report
     ):
         """
         Args:
@@ -214,14 +214,15 @@ class iSAIDDataset(Dataset):
                 {"file_name": f, "id": i} for i, f in enumerate(img_files)
             ]
             if self.verbose:
-                print(f"[{self.split.upper()}] Test set: {len(self.images_info)} images")
+                print(
+                    f"[{self.split.upper()}] Test set: {len(self.images_info)} images"
+                )
 
     def _print_statistics_report(self):
         """Print detailed dataset statistics report after filtering."""
         # Compute box count statistics for final dataset
         box_counts = [
-            len(self.anns_per_image.get(img["id"], []))
-            for img in self.images_info
+            len(self.anns_per_image.get(img["id"], [])) for img in self.images_info
         ]
 
         if len(box_counts) == 0:
@@ -241,24 +242,34 @@ class iSAIDDataset(Dataset):
 
         # Rejection reasons
         total_rejected = (
-            self._stats["rejected_too_many_boxes"] +
-            self._stats["rejected_empty_excess"]
+            self._stats["rejected_too_many_boxes"]
+            + self._stats["rejected_empty_excess"]
         )
         if total_rejected > 0:
             print(f"\nRejected Images ({total_rejected} total):")
             if self._stats["rejected_too_many_boxes"] > 0:
-                print(f"   - Too many boxes (>{self.max_boxes_per_image}): "
-                      f"{self._stats['rejected_too_many_boxes']}")
+                print(
+                    f"   - Too many boxes (>{self.max_boxes_per_image}): "
+                    f"{self._stats['rejected_too_many_boxes']}"
+                )
             if self._stats["rejected_empty_excess"] > 0:
-                print(f"   - Empty image excess:       "
-                      f"{self._stats['rejected_empty_excess']}")
+                print(
+                    f"   - Empty image excess:       "
+                    f"{self._stats['rejected_empty_excess']}"
+                )
 
         # Empty image statistics
         total_final = len(self.images_info)
-        empty_pct = (self._stats["empty_images_kept"] / total_final * 100) if total_final > 0 else 0
+        empty_pct = (
+            (self._stats["empty_images_kept"] / total_final * 100)
+            if total_final > 0
+            else 0
+        )
         print(f"\nBox Distribution (final dataset):")
-        print(f"   Empty images (0 boxes):  {self._stats['empty_images_kept']} "
-              f"({empty_pct:.1f}%)")
+        print(
+            f"   Empty images (0 boxes):  {self._stats['empty_images_kept']} "
+            f"({empty_pct:.1f}%)"
+        )
         print(f"   Non-empty images:        {self._stats['non_empty_images_kept']}")
 
         # Box count statistics
@@ -512,23 +523,23 @@ if __name__ == "__main__":
     # - max_boxes_per_image=400: Exclude extreme outliers
     # - max_empty_fraction=0.3: Keep max 30% empty images
     print("Creating datasets with outlier filtering...\n")
-    
+
     train_dataset = iSAIDDataset(
-        root_dir, 
+        root_dir,
         split="train",
         max_boxes_per_image=400,
         max_empty_fraction=0.3,
         filter_seed=42,
     )
-    
+
     val_dataset = iSAIDDataset(
-        root_dir, 
+        root_dir,
         split="val",
         max_boxes_per_image=400,
         max_empty_fraction=0.3,
         filter_seed=42,
     )
-    
+
     test_dataset = iSAIDDataset(root_dir, split="test")
 
     print(f"Final dataset sizes:")
