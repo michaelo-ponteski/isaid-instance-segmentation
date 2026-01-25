@@ -1158,6 +1158,7 @@ class Trainer:
 
         best_loss = float("inf")
         best_map = 0.0
+        best_train_map = 0.0
 
         # Update W&B logger epoch tracking
         if self.wandb_logger is not None:
@@ -1286,7 +1287,20 @@ class Trainer:
             if val_map > best_map:
                 best_map = val_map
                 self.save_checkpoint(f"{save_dir}/best_map.pth", epoch, val_loss)
-                print(f"-> New best mAP@0.5: {best_map:.4f}")
+                print(f"-> New best val mAP@0.5: {best_map:.4f}")
+
+            # Track best training mAP (separate artifact for overfitting analysis)
+            if train_map > best_train_map:
+                best_train_map = train_map
+                best_train_map_path = f"{save_dir}/best_train_map.pth"
+                self.save_checkpoint(best_train_map_path, epoch, val_loss)
+                print(f"-> New best train mAP@0.5: {best_train_map:.4f}")
+
+                # Log to W&B as separate artifact
+                if self.wandb_logger is not None:
+                    self.wandb_logger.log_best_train_map_model(
+                        best_train_map_path, train_map, val_map
+                    )
 
             gc.collect()
             torch.cuda.empty_cache()
