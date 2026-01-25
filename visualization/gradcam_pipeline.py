@@ -1285,10 +1285,14 @@ class MaskRCNNVisualizationPipeline:
         
         if masks is not None:
             masks = masks[keep].cpu().numpy()
+            height, width = pred_img.shape[:2]
             mask_overlay = np.zeros_like(pred_img, dtype=np.float32)
             for mask, label in zip(masks, labels):
                 if mask.ndim == 3:
                     mask = mask[0]
+                # Resize mask to image size if needed
+                if mask.shape[0] != height or mask.shape[1] != width:
+                    mask = cv2.resize(mask.astype(np.float32), (width, height), interpolation=cv2.INTER_LINEAR)
                 mask_binary = (mask > 0.5).astype(np.uint8)
                 color = np.array(ISAID_COLORS.get(label, [255, 255, 255])) / 255.0
                 for c in range(3):
