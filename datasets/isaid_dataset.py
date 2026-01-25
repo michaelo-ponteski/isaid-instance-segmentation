@@ -14,16 +14,27 @@ class iSAIDDataset(Dataset):
     Supports train/val/test splits with COCO-format annotations.
     """
 
-    def __init__(self, root_dir, split="train", transforms=None):
+    def __init__(
+        self,
+        root_dir,
+        split="train",
+        transforms=None,
+        filter_empty=True,
+        image_size=800,
+    ):
         """
         Args:
             root_dir: Path to iSAID_patches directory
             split: 'train', 'val', or 'test'
             transforms: Optional transforms to apply
+            filter_empty: If True, filter out images without annotations
+            image_size: Target size for images (images will be resized to square)
         """
         self.root_dir = root_dir
         self.split = split
         self.transforms = transforms
+        self.filter_empty = filter_empty
+        self.image_size = image_size
 
         # Setup paths
         self.img_dir = os.path.join(root_dir, split, "images")
@@ -47,6 +58,18 @@ class iSAIDDataset(Dataset):
                 if img_id not in self.anns_per_image:
                     self.anns_per_image[img_id] = []
                 self.anns_per_image[img_id].append(ann)
+
+            # Filter out images without annotations if requested
+            if self.filter_empty:
+                self.images_info = [
+                    img
+                    for img in self.images_info
+                    if img["id"] in self.anns_per_image
+                    and len(self.anns_per_image[img["id"]]) > 0
+                ]
+                print(
+                    f"Filtered dataset: {len(self.images_info)} images with annotations"
+                )
         else:
             # For test set, just list all images
             img_files = [
@@ -68,6 +91,7 @@ class iSAIDDataset(Dataset):
 
         # Load image
         image = Image.open(img_path).convert("RGB")
+        orig_width, orig_height = image.size
 
         # Prepare target dict
         target = {"image_id": img_info["id"]}
@@ -103,21 +127,91 @@ class iSAIDDataset(Dataset):
                     masks.append(mask)
 
             if len(boxes) > 0:
+                boxes = np.array(boxes, dtype=np.float32)
+                masks = np.array(masks, dtype=np.uint8)
+                labels = np.array(labels, dtype=np.int64)
+                areas = np.array(areas, dtype=np.float32)
+
+                # Resize image and adjust boxes/masks if image_size is specified
+                if self.image_size is not None:
+                    # Calculate scale factors
+                    scale_x = self.image_size / orig_width
+                    scale_y = self.image_size / orig_height
+
+                    # Resize image
+                    image = image.resize(
+                        (self.image_size, self.image_size), Image.BILINEAR
+                    )
+
+                    # Scale boxes
+                    boxes[:, [0, 2]] *= scale_x  # x coordinates
+                    boxes[:, [1, 3]] *= scale_y  # y coordinates
+
+                    # Resize masks
+                    resized_masks = []
+                    for mask in masks:
+                        mask_img = Image.fromarray(mask)
+                        resized_mask = mask_img.resize(
+                            (self.image_size, self.image_size), Image.NEAREST
+                        )
+                        resized_masks.append(np.array(resized_mask))
+                    masks = np.array(resized_masks, dtype=np.uint8)
+
+                # Filter out invalid boxes (zero or negative width/height)
+                # This prevents NaN loss during training
+                widths = boxes[:, 2] - boxes[:, 0]
+                heights = boxes[:, 3] - boxes[:, 1]
+                min_size = 1.0  # Minimum box size in pixels
+                valid_mask = (widths >= min_size) & (heights >= min_size)
+
+                # Also filter out boxes outside image bounds
+                img_h = self.image_size if self.image_size else img_info["height"]
+                img_w = self.image_size if self.image_size else img_info["width"]
+                valid_mask &= (boxes[:, 0] >= 0) & (boxes[:, 1] >= 0)
+                valid_mask &= (boxes[:, 2] <= img_w) & (boxes[:, 3] <= img_h)
+
+                # Clamp boxes to image bounds
+                boxes[:, [0, 2]] = np.clip(boxes[:, [0, 2]], 0, img_w)
+                boxes[:, [1, 3]] = np.clip(boxes[:, [1, 3]], 0, img_h)
+
+                if valid_mask.sum() > 0:
+                    boxes = boxes[valid_mask]
+                    labels = labels[valid_mask]
+                    masks = masks[valid_mask]
+                    areas = areas[valid_mask]
+
                 target["boxes"] = torch.as_tensor(boxes, dtype=torch.float32)
                 target["labels"] = torch.as_tensor(labels, dtype=torch.int64)
-                target["masks"] = torch.as_tensor(np.array(masks), dtype=torch.uint8)
+                target["masks"] = torch.as_tensor(masks, dtype=torch.uint8)
                 target["area"] = torch.as_tensor(areas, dtype=torch.float32)
                 target["iscrowd"] = torch.zeros(len(boxes), dtype=torch.int64)
             else:
                 # No annotations
+                target_height = (
+                    self.image_size
+                    if self.image_size is not None
+                    else img_info["height"]
+                )
+                target_width = (
+                    self.image_size
+                    if self.image_size is not None
+                    else img_info["width"]
+                )
                 target["boxes"] = torch.zeros((0, 4), dtype=torch.float32)
                 target["labels"] = torch.zeros(0, dtype=torch.int64)
                 target["masks"] = torch.zeros(
-                    (0, img_info["height"], img_info["width"]), dtype=torch.uint8
+                    (0, target_height, target_width), dtype=torch.uint8
                 )
+
+        # Resize image for test split too
+        if self.split == "test" and self.image_size is not None:
+            image = image.resize((self.image_size, self.image_size), Image.BILINEAR)
 
         if self.transforms:
             image = self.transforms(image)
+        else:
+            # Convert PIL Image to tensor if no transforms provided
+            image = transforms.ToTensor()(image)
 
         return image, target
 
@@ -148,9 +242,17 @@ def visualize_sample(dataset, idx):
 
     plt.figure(figsize=(12, 8))
 
-    # Convert tensor to numpy for visualization
+    # Convert tensor to numpy for visualization and denormalize if needed
     if isinstance(image, torch.Tensor):
         image_np = image.permute(1, 2, 0).numpy()
+        # Check if image is normalized (values outside 0-1 range)
+        if image_np.min() < 0 or image_np.max() > 1:
+            # Denormalize using ImageNet mean/std
+            mean = np.array([0.485, 0.456, 0.406])
+            std = np.array([0.229, 0.224, 0.225])
+            image_np = image_np * std + mean
+        # Clip to valid range
+        image_np = np.clip(image_np, 0, 1)
     else:
         image_np = np.array(image)
 
@@ -168,8 +270,16 @@ def visualize_sample(dataset, idx):
                 (x1, y1), x2 - x1, y2 - y1, fill=False, edgecolor="red", linewidth=2
             )
             ax.add_patch(rect)
-            # Get category name if available
-            cat_names = dataset.get_category_names()
+            # Get category name if available - handle Subset wrapper
+            if hasattr(dataset, "dataset"):
+                base_dataset = dataset.dataset
+            else:
+                base_dataset = dataset
+            cat_names = (
+                base_dataset.get_category_names()
+                if hasattr(base_dataset, "get_category_names")
+                else {}
+            )
             cat_name = cat_names.get(int(label), f"Class {label}")
 
             plt.text(
@@ -185,3 +295,41 @@ def visualize_sample(dataset, idx):
     plt.title(f"Sample {idx}")
     plt.tight_layout()
     plt.show()
+
+
+# Initialize datasets
+if __name__ == "__main__":
+    root_dir = "iSAID_patches"
+
+    # Create datasets
+    train_dataset = iSAIDDataset(root_dir, split="train")
+    val_dataset = iSAIDDataset(root_dir, split="val")
+    test_dataset = iSAIDDataset(root_dir, split="test")
+
+    print(f"Train samples: {len(train_dataset)}")
+    print(f"Val samples: {len(val_dataset)}")
+    print(f"Test samples: {len(test_dataset)}")
+
+    # Get category names
+    categories = train_dataset.get_category_names()
+    print(f"\nCategories: {categories}")
+
+    # Visualize a sample
+    visualize_sample(train_dataset, 0)
+
+    # Create dataloaders
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=2,
+        shuffle=True,
+        num_workers=2,
+        collate_fn=lambda x: tuple(zip(*x)),
+    )
+
+    # Test iteration
+    images, targets = next(iter(train_loader))
+    print(f"\nBatch size: {len(images)}")
+    print(
+        f"Image shape: {images[0].shape if isinstance(images[0], torch.Tensor) else 'PIL Image'}"
+    )
+    print(f"Target keys: {targets[0].keys()}")

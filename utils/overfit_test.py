@@ -7,62 +7,85 @@ from PIL import Image, ImageDraw
 import copy
 
 
-def overfit_single_image_test(model, dataset, idx=0, num_epochs=100, device="cuda"):
+def overfit_single_image_test(
+    model, dataset, idx=0, num_epochs=100, device="cuda", num_images=3
+):
     """
-    Test if model can overfit to a single image.
+    Test if model can overfit to a small set of images.
     This is a sanity check to ensure the model can learn.
 
     Args:
         model: Mask R-CNN model
         dataset: Dataset object
-        idx: Index of image to overfit
+        idx: Starting index of images to overfit (will use idx, idx+1, idx+2, ...)
         num_epochs: Number of epochs to train
         device: Device to use
+        num_images: Number of images to overfit (default: 3)
     """
     print("=" * 80)
-    print("OVERFIT SINGLE IMAGE TEST")
+    print(f"OVERFIT TEST ({num_images} IMAGES)")
     print("=" * 80)
 
-    # Get single image and target
-    image, target = dataset[idx]
+    # Get multiple images and targets
+    images = []
+    targets = []
 
-    # Convert to tensor if needed
-    if not isinstance(image, torch.Tensor):
-        transform = transforms.Compose(
-            [
-                transforms.ToTensor(),
-            ]
-        )
-        image = transform(image)
+    for i in range(num_images):
+        sample_idx = (idx + i) % len(dataset)  # Wrap around if needed
+        image, target = dataset[sample_idx]
 
-    print(f"\nImage shape: {image.shape}")
-    print(f"Number of instances: {len(target['boxes'])}")
-    print(f"Classes: {target['labels'].tolist()}")
+        # Convert to tensor if needed
+        if not isinstance(image, torch.Tensor):
+            transform = transforms.Compose(
+                [
+                    transforms.ToTensor(),
+                ]
+            )
+            image = transform(image)
+
+        images.append(image)
+        targets.append(target)
+
+        print(f"\nImage {i+1} (idx={sample_idx}):")
+        print(f"  Shape: {image.shape}")
+        print(f"  Instances: {len(target['boxes'])}")
+        print(f"  Classes: {target['labels'].tolist()}")
 
     # Move to device
+    device = torch.device(device if torch.cuda.is_available() else "cpu")
     model = model.to(device)
-    image = image.to(device)
-    target = {
-        k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in target.items()
-    }
+    images = [img.to(device) for img in images]
+    targets = [
+        {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in t.items()}
+        for t in targets
+    ]
 
-    # Create optimizer - SGD with momentum works better for detection models
+    # Use AdamW for more stable training
     params = [p for p in model.parameters() if p.requires_grad]
-    optimizer = torch.optim.SGD(params, lr=0.005, momentum=0.9, weight_decay=0.0005)
+    optimizer = torch.optim.AdamW(params, lr=0.0001, weight_decay=0.01)
 
     # Training loop
     model.train()
     losses_history = []
 
-    print(f"\nTraining for {num_epochs} epochs...")
+    print(f"\nTraining for {num_epochs} epochs on {num_images} images...")
     for epoch in range(num_epochs):
-        # Forward pass
-        loss_dict = model([image], [target])
+        # Forward pass with all images as a batch
+        loss_dict = model(images, targets)
         losses = sum(loss for loss in loss_dict.values())
+
+        # Check for NaN or inf
+        if torch.isnan(losses) or torch.isinf(losses):
+            print(f"Warning: NaN or Inf loss at epoch {epoch+1}. Stopping training.")
+            break
 
         # Backward pass
         optimizer.zero_grad()
         losses.backward()
+
+        # Gradient clipping to prevent explosion (tighter=more stable)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
+
         optimizer.step()
 
         losses_history.append(losses.item())
@@ -85,11 +108,13 @@ def overfit_single_image_test(model, dataset, idx=0, num_epochs=100, device="cud
     # Make predictions
     model.eval()
     with torch.no_grad():
-        predictions = model([image])
+        predictions = model(images)
 
-    # Visualize results
-    num_gt = len(target["boxes"])
-    visualize_predictions(image, target, predictions[0], dataset, num_gt=num_gt)
+    # Visualize results for all images
+    for i, (img, tgt, pred) in enumerate(zip(images, targets, predictions)):
+        print(f"\n--- Image {i+1} Results ---")
+        num_gt = len(tgt["boxes"])
+        visualize_predictions(img, tgt, pred, dataset, num_gt=num_gt)
 
     # Check if model learned
     final_loss = losses_history[-1]
@@ -107,13 +132,41 @@ def overfit_single_image_test(model, dataset, idx=0, num_epochs=100, device="cud
 
 
 def visualize_predictions(
-    image, target, prediction, dataset, conf_threshold=0.5, num_gt=None
+    image, target, prediction, dataset, conf_threshold=0.5, num_gt=None, mask_alpha=0.4
 ):
     """
-    Simple visualization of ground truth vs predictions.
+    Visualization of ground truth vs predictions with masks.
+
+    Args:
+        image: Input image tensor
+        target: Ground truth dict with boxes, labels, masks
+        prediction: Model prediction dict with boxes, labels, scores, masks
+        dataset: Dataset for category names
+        conf_threshold: Confidence threshold for predictions
+        num_gt: Expected number of ground truth boxes (for printing)
+        mask_alpha: Transparency for mask overlay (0-1)
     """
-    # Colors for different classes
+    # RGB colors for different classes (as floats 0-1)
     COLORS = [
+        [1, 0, 0],
+        [0, 0, 1],
+        [0, 1, 0],
+        [1, 0.5, 0],
+        [0.5, 0, 0.5],
+        [0, 1, 1],
+        [1, 0, 1],
+        [1, 1, 0],
+        [0.5, 1, 0],
+        [1, 0.5, 0.5],
+        [0.6, 0.3, 0],
+        [0, 0, 0.5],
+        [0, 0.5, 0.5],
+        [0.5, 0.5, 0],
+        [1, 0.4, 0.7],
+        [1, 0.84, 0],
+    ]
+    # String colors for box edges
+    COLOR_NAMES = [
         "red",
         "blue",
         "green",
@@ -132,58 +185,155 @@ def visualize_predictions(
         "gold",
     ]
 
-    # Convert image to numpy
+    # Convert image to numpy and denormalize if needed
     if isinstance(image, torch.Tensor):
         image_np = image.cpu().permute(1, 2, 0).numpy()
-        image_np = (image_np * 255).astype(np.uint8)
+        # Check if image is normalized (values outside 0-1 range)
+        if image_np.min() < 0 or image_np.max() > 1:
+            # Denormalize using ImageNet mean/std
+            mean = np.array([0.485, 0.456, 0.406])
+            std = np.array([0.229, 0.224, 0.225])
+            image_np = image_np * std + mean
+        # Clip to valid range
+        image_np = np.clip(image_np, 0, 1)
     else:
-        image_np = np.array(image)
+        image_np = (
+            np.array(image) / 255.0 if np.array(image).max() > 1 else np.array(image)
+        )
 
-    cat_names = dataset.get_category_names()
-    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    # Handle Subset wrapper - access underlying dataset
+    if hasattr(dataset, "dataset"):
+        base_dataset = dataset.dataset
+    else:
+        base_dataset = dataset
+    cat_names = (
+        base_dataset.get_category_names()
+        if hasattr(base_dataset, "get_category_names")
+        else {}
+    )
+    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
 
-    # Ground truth
+    # Ground truth with masks
     ax = axes[0]
-    ax.imshow(image_np)
+    img_gt_overlay = image_np.copy()
+
+    # Overlay ground truth masks
+    if "masks" in target and len(target["masks"]) > 0:
+        from scipy.ndimage import binary_dilation, binary_erosion
+
+        gt_masks = target["masks"].cpu().numpy()
+        gt_labels = target["labels"].cpu().numpy()
+        for mask, label in zip(gt_masks, gt_labels):
+            color = np.array(COLORS[int(label) % len(COLORS)])
+            # Handle different mask formats (H,W) or (1,H,W)
+            if mask.ndim == 3:
+                mask = mask[0]
+            mask_bool = mask > 0.5
+            # Fill mask with color
+            img_gt_overlay[mask_bool] = (
+                img_gt_overlay[mask_bool] * (1 - mask_alpha) + color * mask_alpha
+            )
+            # Add dark contour outline for visibility
+            dilated = binary_dilation(mask_bool, iterations=2)
+            eroded = binary_erosion(mask_bool, iterations=1)
+            contour = dilated & ~eroded
+            img_gt_overlay[contour] = color * 0.3  # Darker outline
+
+    ax.imshow(img_gt_overlay)
 
     if "boxes" in target and len(target["boxes"]) > 0:
         boxes = target["boxes"].cpu().numpy()
         labels = target["labels"].cpu().numpy()
         for box, label in zip(boxes, labels):
             x1, y1, x2, y2 = box
-            color = COLORS[int(label) % len(COLORS)]
+            color = COLOR_NAMES[int(label) % len(COLOR_NAMES)]
             rect = plt.Rectangle(
                 (x1, y1), x2 - x1, y2 - y1, fill=False, edgecolor=color, linewidth=2
             )
             ax.add_patch(rect)
 
-    ax.set_title(f"Ground Truth ({len(target['boxes'])} boxes)")
+    num_gt_masks = len(target["masks"]) if "masks" in target else 0
+    ax.set_title(f"Ground Truth ({len(target['boxes'])} boxes, {num_gt_masks} masks)")
     ax.axis("off")
 
-    # Predictions
+    # Predictions with masks
     ax = axes[1]
-    ax.imshow(image_np)
+    img_pred_overlay = image_np.copy()
+    img_h, img_w = img_pred_overlay.shape[:2]
 
     boxes = prediction["boxes"].cpu().numpy()
     labels = prediction["labels"].cpu().numpy()
     scores = prediction["scores"].cpu().numpy()
+    pred_masks = prediction["masks"].cpu().numpy() if "masks" in prediction else None
 
     # Filter by confidence
     keep = scores > conf_threshold
     boxes = boxes[keep]
     labels = labels[keep]
     scores = scores[keep]
+    if pred_masks is not None:
+        pred_masks = pred_masks[keep]
+
+    # Overlay predicted masks
+    if pred_masks is not None and len(pred_masks) > 0:
+        from scipy.ndimage import zoom, binary_dilation, binary_erosion
+
+        for mask, box, label in zip(pred_masks, boxes, labels):
+            color = np.array(COLORS[int(label) % len(COLORS)])
+            # Predicted masks are (1, H, W) with probabilities
+            if mask.ndim == 3:
+                mask = mask[0]
+
+            # Check if mask needs to be resized (raw 28x28 mask head output)
+            mask_h, mask_w = mask.shape
+            if mask_h != img_h or mask_w != img_w:
+                # Resize mask to bounding box size and paste onto full image
+                x1, y1, x2, y2 = map(int, box)
+                x1, y1 = max(0, x1), max(0, y1)
+                x2, y2 = min(img_w, x2), min(img_h, y2)
+                box_h, box_w = y2 - y1, x2 - x1
+
+                if box_h > 0 and box_w > 0:
+                    # Resize mask to box dimensions
+                    scale_h, scale_w = box_h / mask_h, box_w / mask_w
+                    resized_mask = zoom(mask, (scale_h, scale_w), order=1)
+
+                    # Create full-size mask and paste
+                    full_mask = np.zeros((img_h, img_w), dtype=np.float32)
+                    # Handle potential size mismatches due to rounding
+                    paste_h = min(resized_mask.shape[0], img_h - y1)
+                    paste_w = min(resized_mask.shape[1], img_w - x1)
+                    full_mask[y1 : y1 + paste_h, x1 : x1 + paste_w] = resized_mask[
+                        :paste_h, :paste_w
+                    ]
+                    mask = full_mask
+
+            mask_bool = mask > 0.5
+            # Fill mask with color
+            img_pred_overlay[mask_bool] = (
+                img_pred_overlay[mask_bool] * (1 - mask_alpha) + color * mask_alpha
+            )
+            # Add dark contour outline for visibility
+            dilated = binary_dilation(mask_bool, iterations=2)
+            eroded = binary_erosion(mask_bool, iterations=1)
+            contour = dilated & ~eroded
+            img_pred_overlay[contour] = color * 0.3  # Darker outline
+
+    ax.imshow(img_pred_overlay)
 
     for box, label, score in zip(boxes, labels, scores):
         x1, y1, x2, y2 = box
-        color = COLORS[int(label) % len(COLORS)]
+        color = COLOR_NAMES[int(label) % len(COLOR_NAMES)]
         rect = plt.Rectangle(
             (x1, y1), x2 - x1, y2 - y1, fill=False, edgecolor=color, linewidth=2
         )
         ax.add_patch(rect)
         ax.text(x1, y1 - 3, f"{score:.2f}", color=color, fontsize=8)
 
-    ax.set_title(f"Predictions ({len(boxes)} boxes, conf>{conf_threshold})")
+    num_pred_masks = len(pred_masks) if pred_masks is not None else 0
+    ax.set_title(
+        f"Predictions ({len(boxes)} boxes, {num_pred_masks} masks, conf>{conf_threshold})"
+    )
     ax.axis("off")
 
     # Legend for classes that appear
@@ -192,7 +342,7 @@ def visualize_predictions(
         plt.Line2D(
             [0],
             [0],
-            color=COLORS[int(l) % len(COLORS)],
+            color=COLOR_NAMES[int(l) % len(COLOR_NAMES)],
             linewidth=2,
             label=cat_names.get(int(l), f"Class {l}"),
         )
@@ -209,36 +359,4 @@ def visualize_predictions(
     # Print comparison
     if num_gt is not None:
         print(f"\nFound {len(boxes)} boxes (should be {num_gt})")
-
-
-# Complete example workflow
-if __name__ == "__main__":
-    print("Setting up overfit test...")
-
-    # Import previous components
-    from isaid_dataset import iSAIDDataset
-    from maskrcnn_model import get_maskrcnn_model
-
-    # Setup
-    root_dir = "iSAID_patches"
-    num_classes = 16  # 15 classes + background
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    # Load dataset
-    print("Loading dataset...")
-    train_dataset = iSAIDDataset(root_dir, split="train")
-
-    # Create model
-    print("Creating model...")
-    model = get_maskrcnn_model(num_classes, pretrained=True)
-
-    # Run overfit test
-    print("\nStarting overfit test...")
-    losses, predictions = overfit_single_image_test(
-        model, train_dataset, idx=0, num_epochs=50, device=device  # Use first image
-    )
-
-    print("\nOverfit test complete!")
-    print(
-        "If the model successfully overfitted, you're ready to train on the full dataset."
-    )
+        print(f"Found {num_pred_masks} masks (should be {num_gt_masks})")
