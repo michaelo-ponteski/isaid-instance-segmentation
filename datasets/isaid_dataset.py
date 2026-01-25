@@ -12,6 +12,10 @@ class iSAIDDataset(Dataset):
     """
     Dataset loader for iSAID instance segmentation dataset.
     Supports train/val/test splits with COCO-format annotations.
+    
+    Training augmentations (flip, color jitter) are applied automatically
+    for the 'train' split when augment=True. Augmentations are annotation-safe,
+    meaning bounding boxes and masks are transformed together with the image.
     """
 
     def __init__(
@@ -21,20 +25,35 @@ class iSAIDDataset(Dataset):
         transforms=None,
         filter_empty=True,
         image_size=800,
+        augment=None,
     ):
         """
         Args:
             root_dir: Path to iSAID_patches directory
             split: 'train', 'val', or 'test'
-            transforms: Optional transforms to apply
+            transforms: Optional transforms to apply (normalization/tensor conversion)
             filter_empty: If True, filter out images without annotations
             image_size: Target size for images (images will be resized to square)
+            augment: If True, apply training augmentations. If None, defaults to
+                     True for train split, False otherwise.
         """
         self.root_dir = root_dir
         self.split = split
         self.transforms = transforms
         self.filter_empty = filter_empty
         self.image_size = image_size
+        
+        # Set augmentation flag: default to True for train, False for val/test
+        if augment is None:
+            self.augment = (split == "train")
+        else:
+            self.augment = augment
+        
+        # Initialize augmentation pipeline for training
+        self.train_augmentation = None
+        if self.augment:
+            from training.transforms import get_train_augmentation
+            self.train_augmentation = get_train_augmentation()
 
         # Setup paths
         self.img_dir = os.path.join(root_dir, split, "images")
@@ -157,6 +176,20 @@ class iSAIDDataset(Dataset):
                         resized_masks.append(np.array(resized_mask))
                     masks = np.array(resized_masks, dtype=np.uint8)
 
+                # Apply training augmentations (flip, color jitter)
+                # This must be done AFTER resizing but BEFORE validation filtering
+                # to ensure boxes and masks are transformed together with the image.
+                # Augmentations are only applied for training split (controlled by
+                # self.train_augmentation being set).
+                if self.train_augmentation is not None:
+                    image, boxes, masks = self.train_augmentation(image, boxes, masks)
+
+                # Get current image dimensions for validation
+                if isinstance(image, Image.Image):
+                    img_w, img_h = image.size
+                else:
+                    img_h, img_w = image.shape[:2]
+
                 # Filter out invalid boxes (zero or negative width/height)
                 # This prevents NaN loss during training
                 widths = boxes[:, 2] - boxes[:, 0]
@@ -165,8 +198,6 @@ class iSAIDDataset(Dataset):
                 valid_mask = (widths >= min_size) & (heights >= min_size)
 
                 # Also filter out boxes outside image bounds
-                img_h = self.image_size if self.image_size else img_info["height"]
-                img_w = self.image_size if self.image_size else img_info["width"]
                 valid_mask &= (boxes[:, 0] >= 0) & (boxes[:, 1] >= 0)
                 valid_mask &= (boxes[:, 2] <= img_w) & (boxes[:, 3] <= img_h)
 
