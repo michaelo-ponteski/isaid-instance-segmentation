@@ -732,16 +732,24 @@ def visualize_final_predictions(
     if masks is not None:
         height, width = image.shape[:2]
         mask_overlay = np.zeros_like(image, dtype=np.float32)
-        for i, (mask, label) in enumerate(zip(masks, labels)):
+        for i, (mask, label, box) in enumerate(zip(masks, labels, boxes)):
             if mask.ndim == 3:
                 mask = mask[0]
-            # Resize mask to image size if needed
-            if mask.shape[0] != height or mask.shape[1] != width:
-                mask = cv2.resize(mask.astype(np.float32), (width, height), interpolation=cv2.INTER_LINEAR)
-            mask_binary = (mask > 0.5).astype(np.uint8)
-            color = np.array(ISAID_COLORS.get(label, [255, 255, 255])) / 255.0
-            for c in range(3):
-                mask_overlay[:, :, c] += mask_binary * color[c] * 0.4
+            
+            # Get bounding box coordinates
+            x1, y1, x2, y2 = map(int, box)
+            x1, y1 = max(0, x1), max(0, y1)
+            x2, y2 = min(width, x2), min(height, y2)
+            box_h, box_w = y2 - y1, x2 - x1
+            
+            if box_h > 0 and box_w > 0:
+                # Resize mask to bounding box size (not full image)
+                mask_resized = cv2.resize(mask.astype(np.float32), (box_w, box_h), interpolation=cv2.INTER_LINEAR)
+                mask_binary = (mask_resized > 0.5).astype(np.uint8)
+                
+                color = np.array(ISAID_COLORS.get(label, [255, 255, 255])) / 255.0
+                for c in range(3):
+                    mask_overlay[y1:y2, x1:x2, c] += mask_binary * color[c] * 0.4
         
         mask_overlay = np.clip(mask_overlay, 0, 1)
         pred_img = (pred_img.astype(np.float32) / 255.0 * 0.6 + mask_overlay * 0.4)
@@ -1287,16 +1295,22 @@ class MaskRCNNVisualizationPipeline:
             masks = masks[keep].cpu().numpy()
             height, width = pred_img.shape[:2]
             mask_overlay = np.zeros_like(pred_img, dtype=np.float32)
-            for mask, label in zip(masks, labels):
+            for mask, label, box in zip(masks, labels, boxes):
                 if mask.ndim == 3:
                     mask = mask[0]
-                # Resize mask to image size if needed
-                if mask.shape[0] != height or mask.shape[1] != width:
-                    mask = cv2.resize(mask.astype(np.float32), (width, height), interpolation=cv2.INTER_LINEAR)
-                mask_binary = (mask > 0.5).astype(np.uint8)
-                color = np.array(ISAID_COLORS.get(label, [255, 255, 255])) / 255.0
-                for c in range(3):
-                    mask_overlay[:, :, c] += mask_binary * color[c] * 0.5
+                # Get bounding box coordinates
+                x1, y1, x2, y2 = map(int, box)
+                x1, y1 = max(0, x1), max(0, y1)
+                x2, y2 = min(width, x2), min(height, y2)
+                box_h, box_w = y2 - y1, x2 - x1
+                
+                if box_h > 0 and box_w > 0:
+                    # Resize mask to bounding box size (not full image)
+                    mask_resized = cv2.resize(mask.astype(np.float32), (box_w, box_h), interpolation=cv2.INTER_LINEAR)
+                    mask_binary = (mask_resized > 0.5).astype(np.uint8)
+                    color = np.array(ISAID_COLORS.get(label, [255, 255, 255])) / 255.0
+                    for c in range(3):
+                        mask_overlay[y1:y2, x1:x2, c] += mask_binary * color[c] * 0.5
             
             pred_img = (pred_img.astype(np.float32) / 255.0 * 0.5 + mask_overlay)
             pred_img = (np.clip(pred_img, 0, 1) * 255).astype(np.uint8)
