@@ -249,7 +249,7 @@ class GradCAM:
         if cam.max() > 0:
             cam = cam / cam.max()
         
-        cam = cam.cpu().numpy()
+        cam = cam.detach().cpu().numpy()
         
         # Resize if needed
         if target_size is not None:
@@ -273,7 +273,7 @@ class GradCAM:
         if gradients.dim() == 4:
             gradients = gradients[0]
         
-        guided = F.relu(gradients).mean(dim=0).cpu().numpy()
+        guided = F.relu(gradients).mean(dim=0).detach().cpu().numpy()
         if target_size is not None:
             guided = cv2.resize(guided, (target_size[1], target_size[0]))
         
@@ -357,7 +357,7 @@ def visualize_feature_maps(
     if features.dim() == 4:
         features = features[0]
     
-    features = features.cpu().numpy()
+    features = features.detach().cpu().numpy()
     n_channels = min(num_channels, features.shape[0])
     
     # Calculate grid size
@@ -401,7 +401,7 @@ def visualize_attention_maps(
     # Original features (mean across channels)
     if original_features.dim() == 4:
         original_features = original_features[0]
-    feat_mean = original_features.mean(dim=0).cpu().numpy()
+    feat_mean = original_features.mean(dim=0).detach().cpu().numpy()
     feat_mean = (feat_mean - feat_mean.min()) / (feat_mean.max() - feat_mean.min() + 1e-8)
     axes[0].imshow(feat_mean, cmap='viridis')
     axes[0].set_title('Input Features (mean)', fontsize=10)
@@ -409,14 +409,14 @@ def visualize_attention_maps(
     
     # Channel attention weights
     if channel_attention.dim() >= 2:
-        ch_attn = channel_attention.squeeze().cpu().numpy()
+        ch_attn = channel_attention.squeeze().detach().cpu().numpy()
         axes[1].bar(range(len(ch_attn)), ch_attn)
         axes[1].set_title('Channel Attention', fontsize=10)
         axes[1].set_xlabel('Channel')
     
     # Spatial attention map
     if spatial_attention.dim() >= 2:
-        sp_attn = spatial_attention.squeeze().cpu().numpy()
+        sp_attn = spatial_attention.squeeze().detach().cpu().numpy()
         axes[2].imshow(sp_attn, cmap='hot')
         axes[2].set_title('Spatial Attention', fontsize=10)
         axes[2].axis('off')
@@ -446,7 +446,7 @@ def visualize_fpn_features(
         feat = fpn_features[level]
         if feat.dim() == 4:
             feat = feat[0]
-        feat = feat.cpu().numpy()
+        feat = feat.detach().cpu().numpy()
         
         # Mean activation
         mean_feat = feat.mean(axis=0)
@@ -479,9 +479,9 @@ def visualize_rpn_proposals(
     fig, ax = plt.subplots(1, 1, figsize=figsize)
     ax.imshow(image)
     
-    proposals = proposals.cpu().numpy()
+    proposals = proposals.detach().cpu().numpy()
     if objectness is not None:
-        objectness = objectness.cpu().numpy()
+        objectness = objectness.detach().cpu().numpy()
         # Sort by objectness
         indices = np.argsort(objectness)[::-1][:max_proposals]
         proposals = proposals[indices]
@@ -526,7 +526,7 @@ def visualize_roi_align_grid(
     figsize: Tuple[int, int] = (16, 8),
 ) -> plt.Figure:
     """Visualize RoI Align sampling grid on image."""
-    boxes = boxes.cpu().numpy()[:max_boxes]
+    boxes = boxes.detach().cpu().numpy()[:max_boxes]
     n_boxes = len(boxes)
     
     fig, axes = plt.subplots(1, n_boxes + 1, figsize=figsize)
@@ -596,21 +596,21 @@ def visualize_box_head_features(
     fig, axes = plt.subplots(2, 2, figsize=figsize)
     
     # FC1 activations
-    fc1 = fc1_features[:max_rois].cpu().numpy()
+    fc1 = fc1_features[:max_rois].detach().cpu().numpy()
     axes[0, 0].imshow(fc1, aspect='auto', cmap='viridis')
     axes[0, 0].set_xlabel('Feature Dimension')
     axes[0, 0].set_ylabel('RoI Index')
     axes[0, 0].set_title('FC1 Activations', fontsize=12)
     
     # FC2 activations
-    fc2 = fc2_features[:max_rois].cpu().numpy()
+    fc2 = fc2_features[:max_rois].detach().cpu().numpy()
     axes[0, 1].imshow(fc2, aspect='auto', cmap='viridis')
     axes[0, 1].set_xlabel('Feature Dimension')
     axes[0, 1].set_ylabel('RoI Index')
     axes[0, 1].set_title('FC2 Activations', fontsize=12)
     
     # Class scores (softmax)
-    cls_probs = F.softmax(cls_scores[:max_rois], dim=1).cpu().numpy()
+    cls_probs = F.softmax(cls_scores[:max_rois], dim=1).detach().cpu().numpy()
     im = axes[1, 0].imshow(cls_probs, aspect='auto', cmap='hot')
     axes[1, 0].set_xlabel('Class')
     axes[1, 0].set_ylabel('RoI Index')
@@ -660,7 +660,7 @@ def visualize_mask_head_stages(
             feat = feat[box_idx]
         elif feat.dim() == 4:
             feat = feat[0]
-        feat = feat.cpu().numpy()
+        feat = feat.detach().cpu().numpy()
         
         # Mean activation
         if feat.ndim == 3:
@@ -709,13 +709,13 @@ def visualize_final_predictions(
     axes[0].axis('off')
     
     # Predictions
-    boxes = predictions['boxes'].cpu().numpy()
-    labels = predictions['labels'].cpu().numpy()
-    scores = predictions['scores'].cpu().numpy()
+    boxes = predictions['boxes'].detach().cpu().numpy()
+    labels = predictions['labels'].detach().cpu().numpy()
+    scores = predictions['scores'].detach().cpu().numpy()
     masks = predictions.get('masks', None)
     
     if masks is not None:
-        masks = masks.cpu().numpy()
+        masks = masks.detach().cpu().numpy()
     
     # Filter by confidence
     keep = scores >= conf_threshold
@@ -1068,7 +1068,7 @@ class MaskRCNNVisualizationPipeline:
                     # Simple activation-based heatmap (pseudo Grad-CAM)
                     if feat.dim() == 4:
                         feat = feat[0]
-                    heatmap = feat.mean(dim=0).cpu().numpy()
+                    heatmap = feat.mean(dim=0).detach().cpu().numpy()
                     heatmap = (heatmap - heatmap.min()) / (heatmap.max() - heatmap.min() + 1e-8)
                     heatmap = cv2.resize(heatmap, (self.current_image.shape[1], self.current_image.shape[0]))
                     
@@ -1100,7 +1100,7 @@ class MaskRCNNVisualizationPipeline:
                 feat = results['fpn_features'][level]
                 if feat.dim() == 4:
                     feat = feat[0]
-                best_heatmap = feat.mean(dim=0).cpu().numpy()
+                best_heatmap = feat.mean(dim=0).detach().cpu().numpy()
                 best_heatmap = (best_heatmap - best_heatmap.min()) / (best_heatmap.max() - best_heatmap.min() + 1e-8)
                 best_heatmap = cv2.resize(best_heatmap, (self.current_image.shape[1], self.current_image.shape[0]))
                 break
@@ -1152,7 +1152,7 @@ class MaskRCNNVisualizationPipeline:
             feat = extracted['backbone_stage_7']
             if feat.dim() == 4:
                 feat = feat[0]
-            feat_mean = feat.mean(dim=0).cpu().numpy()
+            feat_mean = feat.mean(dim=0).detach().cpu().numpy()
             feat_mean = (feat_mean - feat_mean.min()) / (feat_mean.max() - feat_mean.min() + 1e-8)
             
             ax2 = fig.add_subplot(gs[0, 1])
@@ -1165,7 +1165,7 @@ class MaskRCNNVisualizationPipeline:
             feat = extracted['cbam_attention_c5']
             if feat.dim() == 4:
                 feat = feat[0]
-            feat_mean = feat.mean(dim=0).cpu().numpy()
+            feat_mean = feat.mean(dim=0).detach().cpu().numpy()
             feat_mean = (feat_mean - feat_mean.min()) / (feat_mean.max() - feat_mean.min() + 1e-8)
             
             ax3 = fig.add_subplot(gs[0, 2])
@@ -1179,7 +1179,7 @@ class MaskRCNNVisualizationPipeline:
             feat = fpn_feat['P5']
             if feat.dim() == 4:
                 feat = feat[0]
-            feat_mean = feat.mean(dim=0).cpu().numpy()
+            feat_mean = feat.mean(dim=0).detach().cpu().numpy()
             feat_mean = (feat_mean - feat_mean.min()) / (feat_mean.max() - feat_mean.min() + 1e-8)
             
             ax4 = fig.add_subplot(gs[0, 3])
@@ -1193,7 +1193,7 @@ class MaskRCNNVisualizationPipeline:
                 feat = fpn_feat[level]
                 if feat.dim() == 4:
                     feat = feat[0]
-                feat_mean = feat.mean(dim=0).cpu().numpy()
+                feat_mean = feat.mean(dim=0).detach().cpu().numpy()
                 feat_mean = (feat_mean - feat_mean.min()) / (feat_mean.max() - feat_mean.min() + 1e-8)
                 
                 ax = fig.add_subplot(gs[1, i])
