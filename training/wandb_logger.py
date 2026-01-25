@@ -382,9 +382,36 @@ class WandbLogger:
         
         self.log_model_checkpoint(
             model_path,
-            model_name="isaid-model",
+            model_name="isaid-model-best-val-loss",
             metadata=metadata,
-            aliases=["best", "latest"],
+            aliases=["best-val-loss"],
+        )
+    
+    def log_best_train_map_model(self, model_path: str, train_map: float, val_map: Optional[float] = None):
+        """
+        Log the best training mAP model as a separate artifact.
+        
+        This is logged separately from the best validation loss model to track
+        potential overfitting and keep both checkpoints available.
+        
+        Args:
+            model_path: Path to best train mAP model .pth file
+            train_map: Training mAP score
+            val_map: Optional validation mAP score for comparison
+        """
+        metadata = {
+            "train_map": train_map,
+            "epoch": self._epoch,
+        }
+        if val_map is not None:
+            metadata["val_map"] = val_map
+            metadata["map_gap"] = train_map - val_map
+        
+        self.log_model_checkpoint(
+            model_path,
+            model_name="isaid-model-best-train-map",
+            metadata=metadata,
+            aliases=["best-train-map"],
         )
     
     # =========================================================================
