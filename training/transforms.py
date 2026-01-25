@@ -166,9 +166,9 @@ def get_train_augmentation():
         (flip) together with bounding boxes and masks.
     """
     return TrainAugmentation(
-        flip_prob=0.5,      # 50% chance of horizontal flip
-        brightness=0.2,     # ±10% brightness variation
-        contrast=0.2,       # ±10% contrast variation
+        flip_prob=0.5,  # 50% chance of horizontal flip
+        brightness=0.2,  # ±10% brightness variation
+        contrast=0.2,  # ±10% contrast variation
     )
 
 
