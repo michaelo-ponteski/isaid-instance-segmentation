@@ -544,12 +544,16 @@ class Trainer:
         # - factor=0.5: halve the LR on plateau
         # - patience=3: wait 3 epochs before reducing (mAP is noisier than loss)
         # - threshold=1e-3: minimum change to qualify as improvement
+        # - cooldown=1: wait 1 epoch after LR reduction before resuming monitoring
+        # - min_lr=1e-6: minimum learning rate
         self.scheduler = ReduceLROnPlateau(
             self.optimizer,
             mode="max",
             factor=0.5,
             patience=3,
             threshold=1e-3,
+            cooldown=1,
+            min_lr=1e-6,
         )
         print("Using ReduceLROnPlateau scheduler (steps on validation mAP)")
 
