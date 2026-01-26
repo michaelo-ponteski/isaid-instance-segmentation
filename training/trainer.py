@@ -291,7 +291,7 @@ class Trainer:
         # Training parameters
         batch_size: int = 2,
         val_batch_size: int = 1,
-        lr: float = 0.0001,
+        lr: float = 3e-4,  # base_lr, RoI heads use lr * 0.25
         device: str = "cuda",
         use_amp: bool = True,
         num_workers: int = 2,
@@ -434,10 +434,33 @@ class Trainer:
 
         self.model.to(self.device)
 
-        # Setup optimizer (scheduler created in fit() when we know epochs)
-        params = [p for p in self.model.parameters() if p.requires_grad]
-        self.optimizer = torch.optim.AdamW(params, lr=lr, weight_decay=0.01)
+        # Setup optimizer with differential learning rates
+        # RoI heads (box_head, mask_head, box_predictor, mask_predictor) use lower LR
+        # to prevent overfitting on the smaller detection head
+        roi_lr_alpha = 0.25  # RoI heads use base_lr * alpha
+        roi_keywords = ['roi_heads', 'box_head', 'mask_head', 'box_predictor', 'mask_predictor']
+        
+        roi_params = []
+        base_params = []
+        for name, param in self.model.named_parameters():
+            if not param.requires_grad:
+                continue
+            if any(kw in name for kw in roi_keywords):
+                roi_params.append(param)
+            else:
+                base_params.append(param)
+        
+        param_groups = [
+            {'params': base_params, 'lr': lr},
+            {'params': roi_params, 'lr': lr * roi_lr_alpha, 'name': 'roi_heads'},
+        ]
+        
+        self.optimizer = torch.optim.AdamW(param_groups, lr=lr, weight_decay=0.01)
         self.scheduler = None
+        
+        print(f"Optimizer parameter groups:")
+        print(f"  Base params: {len(base_params)} tensors, lr={lr:.2e}")
+        print(f"  RoI params:  {len(roi_params)} tensors, lr={lr * roi_lr_alpha:.2e} (alpha={roi_lr_alpha})")
 
         # AMP scaler for training only (not used in LR finder)
         self.scaler = GradScaler(enabled=self.use_amp)
@@ -515,20 +538,20 @@ class Trainer:
         )
 
     def _create_scheduler(self):
-        """Create ReduceLROnPlateau learning rate scheduler."""
-        # ReduceLROnPlateau: reduces LR when validation loss plateaus
-        # - mode='min': reduce LR when metric stops decreasing
+        """Create ReduceLROnPlateau learning rate scheduler monitoring val_mAP."""
+        # ReduceLROnPlateau: reduces LR when validation mAP plateaus
+        # - mode='max': reduce LR when metric stops increasing (mAP should increase)
         # - factor=0.5: halve the LR on plateau
-        # - patience=2: wait 2 epochs before reducing
+        # - patience=3: wait 3 epochs before reducing (mAP is noisier than loss)
         # - threshold=1e-3: minimum change to qualify as improvement
         self.scheduler = ReduceLROnPlateau(
             self.optimizer,
-            mode="min",
+            mode="max",
             factor=0.5,
-            patience=2,
+            patience=3,
             threshold=1e-3,
         )
-        print("Using ReduceLROnPlateau scheduler (steps on validation loss)")
+        print("Using ReduceLROnPlateau scheduler (steps on validation mAP)")
 
     def find_lr(
         self,
@@ -1317,9 +1340,9 @@ class Trainer:
 
             val_loss = val_losses["total"]
 
-            # Step ReduceLROnPlateau scheduler with validation loss
+            # Step ReduceLROnPlateau scheduler with validation mAP
             if self.scheduler is not None:
-                self.scheduler.step(val_loss)
+                self.scheduler.step(val_map)
 
             self.save_checkpoint(f"{save_dir}/last.pth", epoch, val_loss)
 
