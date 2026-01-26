@@ -1364,21 +1364,22 @@ class Trainer:
             # Also track best mAP
             if val_map > best_map:
                 best_map = val_map
-                self.save_checkpoint(f"{save_dir}/best_map.pth", epoch, val_loss)
+                best_map_path = f"{save_dir}/best_map.pth"
+                self.save_checkpoint(best_map_path, epoch, val_loss)
                 print(f"-> New best val mAP@0.5: {best_map:.4f}")
 
-            # Track best training mAP (separate artifact for overfitting analysis)
+                # Log best val mAP model as W&B artifact
+                if self.wandb_logger is not None:
+                    self.wandb_logger.log_best_train_map_model(
+                        best_map_path, val_map, train_map
+                    )
+
+            # Track best training mAP (for overfitting analysis, no artifact)
             if train_map > best_train_map:
                 best_train_map = train_map
                 best_train_map_path = f"{save_dir}/best_train_map.pth"
                 self.save_checkpoint(best_train_map_path, epoch, val_loss)
                 print(f"-> New best train mAP@0.5: {best_train_map:.4f}")
-
-                # Log to W&B as separate artifact
-                if self.wandb_logger is not None:
-                    self.wandb_logger.log_best_train_map_model(
-                        best_train_map_path, train_map, val_map
-                    )
 
             # =========================================================
             # EARLY STOPPING: Based on train-val mAP gap (DISABLED BY DEFAULT)
