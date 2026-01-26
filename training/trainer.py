@@ -145,17 +145,30 @@ def create_datasets(
     data_root: str,
     image_size: int = 800,
     subset_fraction: float = 1.0,
+    # Dataset filtering parameters (applied before training)
+    max_boxes_per_image: int = 400,
+    max_empty_fraction: float = 0.3,
+    filter_seed: int = 42,
 ) -> Tuple[Dataset, Dataset]:
     """
-    Create train and validation datasets.
+    Create train and validation datasets with optional filtering.
 
     This is a helper function to create datasets once and reuse them
     across multiple training runs with different models/backbones.
+
+    Filtering is applied BEFORE training to:
+    - Remove outlier images with extreme box counts (prevents RAM/VRAM spikes)
+    - Control the fraction of empty images (prevents empty-dominated batches)
 
     Args:
         data_root: Path to the dataset root directory
         image_size: Image size for resizing
         subset_fraction: Fraction of data to use (0.0 to 1.0)
+        max_boxes_per_image: Max boxes per image. Images with more are excluded.
+            Set to None to disable. Default: 400
+        max_empty_fraction: Max fraction of empty images (0 boxes).
+            Set to 1.0 to keep all. Default: 0.3 (30%)
+        filter_seed: Random seed for deterministic empty image sampling.
 
     Returns:
         Tuple of (train_dataset, val_dataset)
@@ -166,12 +179,18 @@ def create_datasets(
         split="train",
         transforms=get_transforms(train=True),
         image_size=image_size,
+        max_boxes_per_image=max_boxes_per_image,
+        max_empty_fraction=max_empty_fraction,
+        filter_seed=filter_seed,
     )
     val_dataset_full = iSAIDDataset(
         data_root,
         split="val",
         transforms=get_transforms(train=False),
         image_size=image_size,
+        max_boxes_per_image=max_boxes_per_image,
+        max_empty_fraction=max_empty_fraction,
+        filter_seed=filter_seed,
     )
 
     # Apply subset if needed
@@ -1133,9 +1152,12 @@ class Trainer:
         find_lr_first=False,
         compute_metrics_every: int = 1,
         max_map_samples: int = None,
+        # Early stopping based on mAP gap
+        early_stop_gap_patience: int = None,
+        early_stop_gap_threshold: float = 0.01,
     ) -> Dict[str, List[float]]:
         """
-        Train the model with optional W&B logging.
+        Train the model with optional W&B logging and early stopping.
 
         Args:
             epochs: Number of epochs to train
@@ -1143,10 +1165,19 @@ class Trainer:
             find_lr_first: If True, run LR finder before training
             compute_metrics_every: Compute mAP metrics every N epochs (default=1)
             max_map_samples: Max samples for mAP computation (None=all, use smaller for speed)
+            early_stop_gap_patience: Stop training if the train-val mAP gap doesn't improve
+                for this many epochs. Set to None to disable. Default: None
+            early_stop_gap_threshold: Minimum improvement in mAP gap to reset patience counter.
+                Default: 0.01 (1% improvement)
 
         Returns:
             history: Dictionary of metric lists, compatible with TensorBoard logging.
                 Keys follow convention: 'train/<metric>', 'val/<metric>', 'train_val/<metric>'
+
+        Early Stopping Logic (mAP gap):
+            The train-val mAP gap indicates overfitting when positive (train >> val).
+            We stop training if the gap doesn't decrease (improve) for `early_stop_gap_patience` epochs.
+            This catches cases where the model keeps overfitting without validation improvement.
         """
         # Initialize history dictionary for all metrics
         # TensorBoard-compatible naming: prefix/metric_name
@@ -1176,6 +1207,13 @@ class Trainer:
 
         best_loss = float("inf")
         best_map = 0.0
+        best_train_map = 0.0
+
+        # Early stopping state (mAP gap based)
+        # We want the ABSOLUTE gap to DECREASE (closer to 0 = better alignment)
+        # Gap can be positive (overfitting) or negative (underfitting)
+        best_gap_abs = float("inf")
+        gap_patience_counter = 0
 
         # Update W&B logger epoch tracking
         if self.wandb_logger is not None:
@@ -1304,15 +1342,75 @@ class Trainer:
             if val_map > best_map:
                 best_map = val_map
                 self.save_checkpoint(f"{save_dir}/best_map.pth", epoch, val_loss)
-                print(f"-> New best mAP@0.5: {best_map:.4f}")
+                print(f"-> New best val mAP@0.5: {best_map:.4f}")
+
+            # Track best training mAP (separate artifact for overfitting analysis)
+            if train_map > best_train_map:
+                best_train_map = train_map
+                best_train_map_path = f"{save_dir}/best_train_map.pth"
+                self.save_checkpoint(best_train_map_path, epoch, val_loss)
+                print(f"-> New best train mAP@0.5: {best_train_map:.4f}")
+
+                # Log to W&B as separate artifact
+                if self.wandb_logger is not None:
+                    self.wandb_logger.log_best_train_map_model(
+                        best_train_map_path, train_map, val_map
+                    )
+
+            # =========================================================
+            # EARLY STOPPING: Based on train-val mAP gap (DISABLED BY DEFAULT)
+            # =========================================================
+            # The absolute gap should ideally decrease (train and val closer together).
+            # Gap can be positive (train > val = overfitting) or negative (val > train).
+            # We want |gap| to decrease, meaning better alignment between train and val.
+            if (
+                early_stop_gap_patience is not None
+                and epoch % compute_metrics_every == 0
+            ):
+                gap_abs = abs(map_gap)
+                # Check if absolute gap improved (decreased) by at least threshold
+                if gap_abs < best_gap_abs - early_stop_gap_threshold:
+                    best_gap_abs = gap_abs
+                    gap_patience_counter = 0
+                    print(f"-> mAP gap improved: |{map_gap:+.4f}| = {gap_abs:.4f}")
+                else:
+                    gap_patience_counter += 1
+                    print(
+                        f"-> mAP gap patience: {gap_patience_counter}/{early_stop_gap_patience} (|gap|={gap_abs:.4f})"
+                    )
+
+                # Check if we should stop
+                if gap_patience_counter >= early_stop_gap_patience:
+                    print(f"\n{'=' * 60}")
+                    print(
+                        f"EARLY STOPPING: mAP gap not improving for {early_stop_gap_patience} epochs"
+                    )
+                    print(f"  Current gap: {map_gap:+.4f} (|gap|={gap_abs:.4f})")
+                    print(f"  Best |gap|: {best_gap_abs:.4f}")
+                    print(
+                        f"  Train and val performance are not converging - consider stopping."
+                    )
+                    print(f"{'=' * 60}")
+                    break
 
             gc.collect()
             torch.cuda.empty_cache()
 
+        # Determine if training completed normally or was stopped early
+        stopped_early = (
+            early_stop_gap_patience is not None
+            and gap_patience_counter >= early_stop_gap_patience
+        )
+
         print(f"\n{'=' * 60}")
-        print(f"Training complete!")
+        if stopped_early:
+            print(f"Training stopped early at epoch {epoch}/{epochs}")
+        else:
+            print(f"Training complete!")
         print(f"  Best val loss: {best_loss:.4f}")
         print(f"  Best val mAP@0.5: {best_map:.4f}")
+        if early_stop_gap_patience is not None:
+            print(f"  Best |mAP gap|: {best_gap_abs:.4f}")
         print(f"{'=' * 60}")
 
         return history
