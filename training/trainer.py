@@ -33,6 +33,7 @@ try:
         get_fixed_val_batch,
         ISAID_CLASS_LABELS,
     )
+
     WANDB_AVAILABLE = True
 except ImportError:
     WANDB_AVAILABLE = False
@@ -442,15 +443,17 @@ class Trainer:
                 hyperparameters = {}
 
             # Add trainer config to hyperparameters
-            hyperparameters.update({
-                "batch_size": batch_size,
-                "learning_rate": lr,
-                "num_classes": num_classes,
-                "use_amp": use_amp,
-                "device": str(self.device),
-                "train_samples": len(self.train_dataset),
-                "val_samples": len(self.val_dataset),
-            })
+            hyperparameters.update(
+                {
+                    "batch_size": batch_size,
+                    "learning_rate": lr,
+                    "num_classes": num_classes,
+                    "use_amp": use_amp,
+                    "device": str(self.device),
+                    "train_samples": len(self.train_dataset),
+                    "val_samples": len(self.val_dataset),
+                }
+            )
 
             # Create W&B config
             wandb_config = WandbConfig(
@@ -477,7 +480,9 @@ class Trainer:
         # Select evenly spaced indices from validation set
         val_len = len(self.val_dataset)
         step = max(1, val_len // num_images)
-        self._val_image_indices = [min(i * step, val_len - 1) for i in range(num_images)]
+        self._val_image_indices = [
+            min(i * step, val_len - 1) for i in range(num_images)
+        ]
 
         if self.wandb_logger is not None:
             self.wandb_logger.set_validation_images(self._val_image_indices)
@@ -486,23 +491,29 @@ class Trainer:
         self._fixed_val_images, self._fixed_val_targets = get_fixed_val_batch(
             self.val_dataset, self._val_image_indices, str(self.device)
         )
-        print(f"Selected {len(self._val_image_indices)} validation images for visualization")
+        print(
+            f"Selected {len(self._val_image_indices)} validation images for visualization"
+        )
 
     def _create_scheduler(self):
         """Create ReduceLROnPlateau learning rate scheduler."""
-        # ReduceLROnPlateau: reduces LR when validation loss plateaus
-        # - mode='min': reduce LR when metric stops decreasing
-        # - factor=0.5: halve the LR on plateau
+        # ReduceLROnPlateau: reduces LR when validation mAP@0.5 plateaus
+        # - mode='max': reduce LR when metric stops increasing
+        # - factor=0.3: multiply LR by 0.3 on plateau
         # - patience=2: wait 2 epochs before reducing
         # - threshold=1e-3: minimum change to qualify as improvement
+        # - cooldown=1: wait 1 epoch after LR reduction before resuming monitoring
+        # - min_lr=1e-6: minimum learning rate
         self.scheduler = ReduceLROnPlateau(
             self.optimizer,
-            mode="min",
-            factor=0.5,
+            mode="max",
+            factor=0.3,
             patience=2,
             threshold=1e-3,
+            cooldown=1,
+            min_lr=1e-6,
         )
-        print("Using ReduceLROnPlateau scheduler (steps on validation loss)")
+        print("Using ReduceLROnPlateau scheduler (steps on validation mAP@0.5)")
 
     def find_lr(
         self,
@@ -766,8 +777,11 @@ class Trainer:
                 for label_id in all_labels:
                     if label_id not in class_data:
                         class_data[label_id] = {
-                            "pred_boxes": [], "pred_scores": [], "gt_boxes": [],
-                            "n_preds": 0, "n_gts": 0
+                            "pred_boxes": [],
+                            "pred_scores": [],
+                            "gt_boxes": [],
+                            "n_preds": 0,
+                            "n_gts": 0,
                         }
 
                     pred_mask = pred_labels == label_id
@@ -809,7 +823,9 @@ class Trainer:
             else:
                 all_gt_boxes = np.zeros((0, 4), dtype=np.float32)
 
-            ap = self._compute_ap_numpy(all_pred_boxes, all_pred_scores, all_gt_boxes, iou_threshold)
+            ap = self._compute_ap_numpy(
+                all_pred_boxes, all_pred_scores, all_gt_boxes, iou_threshold
+            )
             aps.append(ap)
 
             # Free memory immediately after each class
@@ -998,7 +1014,9 @@ class Trainer:
                     )
 
                     # Log gradient norms for CBAM and RoI layers
-                    self.wandb_logger.log_gradient_norms(self.model, step=self._global_step)
+                    self.wandb_logger.log_gradient_norms(
+                        self.model, step=self._global_step
+                    )
 
                 self._global_step += 1
 
@@ -1265,9 +1283,9 @@ class Trainer:
 
             val_loss = val_losses["total"]
 
-            # Step ReduceLROnPlateau scheduler with validation loss
+            # Step ReduceLROnPlateau scheduler with validation mAP@0.5
             if self.scheduler is not None:
-                self.scheduler.step(val_loss)
+                self.scheduler.step(val_map)
 
             self.save_checkpoint(f"{save_dir}/last.pth", epoch, val_loss)
 
@@ -1313,8 +1331,7 @@ class Trainer:
 
         # Move predictions back to CPU for logging
         predictions_cpu = [
-            {k: v.cpu() for k, v in pred.items()}
-            for pred in predictions
+            {k: v.cpu() for k, v in pred.items()} for pred in predictions
         ]
 
         # Log visualization
