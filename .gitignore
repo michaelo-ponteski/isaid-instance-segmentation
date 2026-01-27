@@ -10,4 +10,24 @@ __pycache__/
 # Ignore Jupyter Notebook checkpoints
 .ipynb_checkpoints/
 
+# Environment files
 .env
+
+# Model checkpoints and outputs
+checkpoints/
+output/
+*.pt
+*.pth
+
+# Data directory
+data/
+iSAID_patches/
+
+# Logs
+*.log
+wandb/
+
+# Virtual environments
+.venv/
+venv/
+env/

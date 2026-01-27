@@ -2,13 +2,19 @@
 
 # Dataset
 data:
-  root_dir: "iSAID_patches"
-  num_classes: 16 # 15 classes + background
-  image_size: 800 # Keep 800 for small objects in satellite images
+  root_dir: "iSAID_patches"  # Local path (override with --data-root)
+  num_classes: 16  # 15 classes + background
+  image_size: 800  # Keep 800 for small objects in satellite images
+  subset_fraction: 1.0  # Fraction of data to use (1.0 = full dataset)
+  max_boxes_per_image: 400  # Filter images with too many boxes
+  max_empty_fraction: 0.3  # Max fraction of empty images
 
 # Model
 model:
+  backbone: "efficientnet_b0"
   pretrained_backbone: true
+  cbam_reduction_ratio: 16
+  roi_head_layers: 4
 
 # RPN Anchor Configuration
 anchors:
@@ -16,26 +22,51 @@ anchors:
   optimize: false
   optimization_trials: 20  # Number of Optuna trials
   cache_path: "optimized_anchors.pt"  # Cache file for optimized anchors
-  
+
   # Custom anchor sizes (used only if optimize=false)
   # Each tuple corresponds to an FPN level (P2, P3, P4, P5)
   # Default values are optimized for satellite imagery with small objects
   sizes:
-    - [8, 16]   # P2 - smallest objects
+    - [8, 16]    # P2 - smallest objects
     - [16, 32]   # P3
-    - [32, 64]   # P4  
-    - [64, 128] # P5 - largest objects
-  
+    - [32, 64]   # P4
+    - [64, 128]  # P5 - largest objects
+
   # Aspect ratios for each anchor size
   aspect_ratios: [0.5, 1.0, 2.0]
 
 # Training
 training:
-  epochs: 20
-  batch_size: 4
-  lr: 0.0001
-  amp: true # Mixed precision for memory
+  epochs: 25
+  batch_size: 8
+  val_batch_size: 8
+  learning_rate: 0.0003
+  weight_decay: 0.01
+  num_workers: 4
+  amp: true  # Mixed precision for memory efficiency
+
+  # Metrics computation
+  compute_metrics_every: 1  # Compute mAP every N epochs
+  max_map_samples: 200  # Limit samples for faster mAP computation
+
+  # Early stopping (set to null to disable)
+  early_stop_gap_patience: null
+  early_stop_gap_threshold: 0.01
 
 # Checkpoints
 checkpoint:
-  save_dir: "checkpoints"
+  save_dir: "checkpoints"  # Local path (override with --output-dir for Docker)
+
+# Weights & Biases Integration
+wandb:
+  enabled: true
+  project: "isaid-custom-segmentation"
+  entity: null  # Set your W&B entity/team name, or leave null for personal
+  tags:
+    - "maskrcnn"
+    - "efficientnet"
+    - "cbam"
+  notes: "Training with EfficientNet backbone + CBAM + FPN"
+  log_freq: 20  # Log every N batches
+  num_val_images: 4  # Number of images for validation visualization
+  conf_threshold: 0.5  # Confidence threshold for predictions
