@@ -438,8 +438,14 @@ class Trainer:
         # RoI heads (box_head, mask_head, box_predictor, mask_predictor) use lower LR
         # to prevent overfitting on the smaller detection head
         roi_lr_alpha = 0.25  # RoI heads use base_lr * alpha
-        roi_keywords = ['roi_heads', 'box_head', 'mask_head', 'box_predictor', 'mask_predictor']
-        
+        roi_keywords = [
+            "roi_heads",
+            "box_head",
+            "mask_head",
+            "box_predictor",
+            "mask_predictor",
+        ]
+
         roi_params = []
         base_params = []
         for name, param in self.model.named_parameters():
@@ -449,18 +455,20 @@ class Trainer:
                 roi_params.append(param)
             else:
                 base_params.append(param)
-        
+
         param_groups = [
-            {'params': base_params, 'lr': lr},
-            {'params': roi_params, 'lr': lr * roi_lr_alpha, 'name': 'roi_heads'},
+            {"params": base_params, "lr": lr},
+            {"params": roi_params, "lr": lr * roi_lr_alpha, "name": "roi_heads"},
         ]
-        
+
         self.optimizer = torch.optim.AdamW(param_groups, lr=lr, weight_decay=0.01)
         self.scheduler = None
-        
+
         print(f"Optimizer parameter groups:")
         print(f"  Base params: {len(base_params)} tensors, lr={lr:.2e}")
-        print(f"  RoI params:  {len(roi_params)} tensors, lr={lr * roi_lr_alpha:.2e} (alpha={roi_lr_alpha})")
+        print(
+            f"  RoI params:  {len(roi_params)} tensors, lr={lr * roi_lr_alpha:.2e} (alpha={roi_lr_alpha})"
+        )
 
         # AMP scaler for training only (not used in LR finder)
         self.scaler = GradScaler(enabled=self.use_amp)
@@ -1542,6 +1550,9 @@ class Trainer:
         if num_samples == 1:
             axes = axes.reshape(1, -1)
 
+        # Track unique categories for legend
+        all_categories = set()
+
         for idx, sample_idx in enumerate(indices):
             image, target = self.val_dataset[sample_idx]
 
@@ -1623,21 +1634,12 @@ class Trainer:
                         (x1, y1),
                         x2 - x1,
                         y2 - y1,
-                        linewidth=2,
+                        linewidth=1,
                         edgecolor=color,
                         facecolor="none",
                     )
                     ax_gt.add_patch(rect)
-
-                    cat_name = category_names.get(int(label), f"Class {label}")
-                    ax_gt.text(
-                        x1,
-                        y1 - 5,
-                        cat_name,
-                        color="white",
-                        fontsize=8,
-                        bbox=dict(facecolor=color, alpha=0.7),
-                    )
+                    all_categories.add(int(label))
 
             # Predictions visualization with masks
             ax_pred = axes[idx, 1]
@@ -1707,21 +1709,32 @@ class Trainer:
                     (x1, y1),
                     x2 - x1,
                     y2 - y1,
-                    linewidth=2,
+                    linewidth=1,
                     edgecolor=color,
                     facecolor="none",
                 )
                 ax_pred.add_patch(rect)
+                all_categories.add(int(label))
 
+        # Add legend for color-to-category mapping
+        if all_categories:
+            legend_elements = []
+            for label in sorted(all_categories):
+                color = COLORS[int(label) % len(COLORS)]
                 cat_name = category_names.get(int(label), f"Class {label}")
-                ax_pred.text(
-                    x1,
-                    y1 - 5,
-                    f"{cat_name} {score:.2f}",
-                    color="white",
-                    fontsize=8,
-                    bbox=dict(facecolor=color, alpha=0.7),
+                legend_elements.append(
+                    patches.Patch(facecolor=color, edgecolor=color, label=cat_name)
                 )
+
+            # Add legend below the plot
+            fig.legend(
+                handles=legend_elements,
+                loc="lower center",
+                ncol=min(4, len(legend_elements)),
+                bbox_to_anchor=(0.5, -0.02),
+                frameon=True,
+                fontsize=9,
+            )
 
         plt.tight_layout()
 
