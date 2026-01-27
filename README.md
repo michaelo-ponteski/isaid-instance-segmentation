@@ -8,7 +8,6 @@ Custom Mask R-CNN implementation for instance segmentation on aerial/satellite i
 - **Optimized for Aerial Images**: Custom anchor sizes for small object detection
 - **Experiment Tracking**: Full Weights & Biases integration
 - **Flexible Training**: CLI-based training script with configuration file support
-- **Docker Support**: Optional containerized training environment
 
 ## Quick Start
 
