@@ -2,13 +2,7 @@
 Anchor Size Optimizer for RPN using Optuna.
 
 This module optimizes anchor sizes using GEOMETRIC COVERAGE (theoretical recall)
-rather than training-based recall. This is:
-- 100x faster (no model training required)
-- More stable (no random initialization noise)
-- Physically correct (respects FPN stride constraints)
 
-Key insight: Anchor optimization should find anchors that geometrically cover
-the ground truth boxes with high IoU, NOT train a model to convergence.
 """
 
 import os
@@ -30,7 +24,7 @@ except ImportError:
     Trial = Any  # Type hint fallback
 
 
-# FPN stride configuration (standard for Mask R-CNN)
+# FPN stride configuration
 FPN_STRIDES = {
     'P2': 4,
     'P3': 8,
@@ -213,7 +207,6 @@ class DatasetAnchorAnalyzer:
             min_size = stride * 2  # Minimum valid anchor size
             max_size = stride * 12  # Maximum reasonable anchor size
 
-            # Use data distribution but enforce constraints
             if i == 0:  # P2 - smallest objects
                 target_percentile = 25
             elif i == 1:  # P3
@@ -233,13 +226,7 @@ class DatasetAnchorAnalyzer:
 
         print(f"\nStride-constrained anchor sizes: {anchor_sizes}")
         return tuple(anchor_sizes)
-
-    def suggest_anchor_sizes(self, num_scales: int = 4) -> Tuple[Tuple[int, ...], ...]:
-        """
-        Suggest anchor sizes based on dataset statistics (legacy method).
-        Now calls the stride-constrained version.
-        """
-        return self.suggest_anchor_sizes_with_stride_constraints()
+    
 
     def suggest_aspect_ratios(self, num_ratios: int = 3) -> Tuple[float, ...]:
         """
@@ -266,12 +253,7 @@ class GeometricAnchorOptimizer:
     Optuna-based anchor optimizer using GEOMETRIC COVERAGE.
 
     This optimizer evaluates anchor configurations by computing theoretical recall
-    based purely on IoU between anchors and ground truth boxes - NO training required.
-
-    This is:
-    - 100x faster than training-based optimization
-    - More stable (no random initialization noise)
-    - Physically correct (respects FPN stride constraints)
+    based purely on IoU between anchors and ground truth boxes
     """
 
     def __init__(
@@ -395,7 +377,6 @@ class GeometricAnchorOptimizer:
         anchor_sizes = []
 
         for level_idx, stride in enumerate(self.strides):
-            # CRITICAL: Enforce stride constraints
             # Anchor size must be >= stride * 2 to be effective
             min_size = stride * 2
             max_size = stride * 16
@@ -526,93 +507,6 @@ class GeometricAnchorOptimizer:
 AnchorOptimizer = GeometricAnchorOptimizer
 
 
-def optimize_anchors_for_dataset(
-    data_root: str,
-    num_classes: int = 16,
-    n_trials: int = 50,
-    image_size: int = 800,
-    num_samples: int = 500,
-) -> AnchorConfig:
-    """
-    Convenience function to run anchor optimization on a dataset.
-
-    Args:
-        data_root: Root directory of the dataset
-        num_classes: Number of classes (not used, kept for compatibility)
-        n_trials: Number of optimization trials
-        image_size: Image size for the dataset
-        num_samples: Number of samples to evaluate
-
-    Returns:
-        Best anchor configuration
-    """
-    from datasets.isaid_dataset import iSAIDDataset
-    from training.transforms import get_transforms
-
-    print("Loading dataset for anchor optimization...")
-    dataset = iSAIDDataset(
-        data_root, split="train",
-        transforms=get_transforms(train=False),
-        image_size=image_size
-    )
-
-    optimizer = GeometricAnchorOptimizer(
-        dataset=dataset,
-        image_size=(image_size, image_size),
-        num_samples=num_samples,
-    )
-
-    return optimizer.optimize(n_trials=n_trials)
-
-
-def analyze_dataset_anchors(
-    data_root: str,
-    image_size: int = 800,
-    num_samples: int = 1000,
-) -> Dict[str, Any]:
-    """
-    Analyze dataset to get suggested anchor sizes without optimization.
-
-    Args:
-        data_root: Root directory of the dataset
-        image_size: Image size
-        num_samples: Number of samples to analyze
-
-    Returns:
-        Dictionary with suggested configurations and statistics
-    """
-    from datasets.isaid_dataset import iSAIDDataset
-    from training.transforms import get_transforms
-
-    dataset = iSAIDDataset(
-        data_root, split="train",
-        transforms=get_transforms(train=False),
-        image_size=image_size
-    )
-
-    analyzer = DatasetAnchorAnalyzer(dataset, num_samples=num_samples)
-    stats = analyzer.compute_box_statistics()
-
-    # Get stride-constrained suggestions
-    suggested_sizes = analyzer.suggest_anchor_sizes_with_stride_constraints()
-    suggested_ratios = analyzer.suggest_aspect_ratios()
-
-    return {
-        'suggested_sizes': suggested_sizes,
-        'suggested_ratios': suggested_ratios,
-        'statistics': {
-            'mean_width': float(np.mean(stats['widths'])),
-            'mean_height': float(np.mean(stats['heights'])),
-            'mean_area': float(np.mean(stats['areas'])),
-            'std_area': float(np.std(stats['areas'])),
-            'min_area': float(np.min(stats['areas'])),
-            'max_area': float(np.max(stats['areas'])),
-            'mean_aspect_ratio': float(np.mean(stats['aspect_ratios'])),
-            'num_boxes_analyzed': len(stats['widths']),
-        }
-    }
-
-
 def compare_anchor_configs(
     dataset,
     configs: Dict[str, AnchorConfig],
@@ -653,34 +547,3 @@ def compare_anchor_configs(
 
     return results
 
-
-if __name__ == "__main__":
-    import argparse
-
-    parser = argparse.ArgumentParser(description="Optimize anchor sizes for RPN")
-    parser.add_argument("--data_root", type=str, default="iSAID_patches",
-                       help="Dataset root directory")
-    parser.add_argument("--n_trials", type=int, default=50,
-                       help="Number of optimization trials")
-    parser.add_argument("--num_samples", type=int, default=500,
-                       help="Number of samples to evaluate")
-    parser.add_argument("--analyze_only", action="store_true",
-                       help="Only analyze dataset, don't optimize")
-
-    args = parser.parse_args()
-
-    if args.analyze_only:
-        results = analyze_dataset_anchors(args.data_root, num_samples=args.num_samples)
-        print("\nDataset Analysis Results:")
-        print(f"Suggested sizes: {results['suggested_sizes']}")
-        print(f"Suggested ratios: {results['suggested_ratios']}")
-        print(f"Statistics: {results['statistics']}")
-    else:
-        best_config = optimize_anchors_for_dataset(
-            data_root=args.data_root,
-            n_trials=args.n_trials,
-            num_samples=args.num_samples,
-        )
-        print(f"\nUse these in your model:")
-        print(f"rpn_anchor_sizes={best_config.sizes}")
-        print(f"rpn_aspect_ratios={best_config.aspect_ratios}")
