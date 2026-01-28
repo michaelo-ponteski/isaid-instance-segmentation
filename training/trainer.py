@@ -8,7 +8,7 @@ import gc
 import math
 import numpy as np
 from pathlib import Path
-from typing import Optional, Tuple, Union, Dict, List, Any
+from typing import Optional, Tuple, Dict, List, Any
 
 import torch
 from torch.utils.data import DataLoader, Subset, Dataset
@@ -29,9 +29,7 @@ try:
     from training.wandb_logger import (
         WandbLogger,
         WandbConfig,
-        compute_gradient_norms,
         get_fixed_val_batch,
-        ISAID_CLASS_LABELS,
     )
 
     WANDB_AVAILABLE = True
@@ -131,7 +129,6 @@ def compute_ap_single_class(
     recalls = tp_cumsum / len(gt_boxes)
     precisions = tp_cumsum / (tp_cumsum + fp_cumsum + 1e-6)
 
-    # 11-point interpolation for AP
     ap = 0.0
     for t in torch.linspace(0, 1, 11):
         mask = recalls >= t
@@ -230,53 +227,6 @@ class Trainer:
         - Learning rate tracking
         - Validation image predictions visualization
         - Model checkpointing as artifacts
-
-    Example usage with W&B:
-        # Create datasets and model
-        train_ds, val_ds = create_datasets("iSAID_patches", image_size=800)
-        model = CustomMaskRCNN(num_classes=16)
-
-        # Define hyperparameters (logged to W&B)
-        hyperparams = {
-            "learning_rate": 0.005,
-            "batch_size": 2,
-            "num_epochs": 50,
-            "backbone": "efficientnet_b0",
-        }
-
-        # Create trainer with W&B
-        trainer = Trainer(
-            train_dataset=train_ds,
-            val_dataset=val_ds,
-            model=model,
-            wandb_project="my-project",
-            wandb_tags=["experiment-1"],
-            hyperparameters=hyperparams,
-        )
-        trainer.fit(epochs=50)
-
-    Example usage with external datasets and model:
-        # Create datasets once
-        train_ds, val_ds = create_datasets("iSAID_patches", image_size=800)
-
-        # Create model with custom backbone
-        model = CustomMaskRCNN(num_classes=16, backbone_with_fpn=my_backbone)
-
-        # Train
-        trainer = Trainer(
-            train_dataset=train_ds,
-            val_dataset=val_ds,
-            model=model,
-        )
-        trainer.train(epochs=20)
-
-        # Train another model with same datasets
-        model2 = CustomMaskRCNN(num_classes=16, backbone_with_fpn=other_backbone)
-        trainer2 = Trainer(
-            train_dataset=train_ds,
-            val_dataset=val_ds,
-            model=model2,
-        )
     """
 
     def __init__(
@@ -518,7 +468,7 @@ class Trainer:
             )
 
             # Initialize logger
-            self.wandb_logger = WandbLogger(wandb_config, hyperparameters)
+            self.wandb_logger = WandbLogger(wandb_config, hyperparameters, )
 
             # Setup fixed validation images for consistent visualization
             self._setup_validation_images(wandb_num_val_images)
@@ -547,13 +497,6 @@ class Trainer:
 
     def _create_scheduler(self):
         """Create ReduceLROnPlateau learning rate scheduler monitoring val_mAP."""
-        # ReduceLROnPlateau: reduces LR when validation mAP plateaus
-        # - mode='max': reduce LR when metric stops increasing (mAP should increase)
-        # - factor=0.5: halve the LR on plateau
-        # - patience=3: wait 3 epochs before reducing (mAP is noisier than loss)
-        # - threshold=1e-3: minimum change to qualify as improvement
-        # - cooldown=1: wait 1 epoch after LR reduction before resuming monitoring
-        # - min_lr=1e-6: minimum learning rate
         self.scheduler = ReduceLROnPlateau(
             self.optimizer,
             mode="max",
@@ -565,193 +508,6 @@ class Trainer:
         )
         print("Using ReduceLROnPlateau scheduler (steps on validation mAP)")
 
-    def find_lr(
-        self,
-        start_lr: float = 1e-6,
-        end_lr: float = 1e-2,
-        num_iter: int = 100,
-        smooth_factor: float = 0.05,
-        plot: bool = True,
-    ) -> float:
-        """
-        Learning Rate Finder using the LR range test.
-
-        This is a DIAGNOSTIC TOOL ONLY - it does NOT update model weights.
-        It performs forward + backward passes to measure loss response at different LRs,
-        then restores the exact initial state.
-
-        Args:
-            start_lr: Starting learning rate (default 1e-6, safe for detection)
-            end_lr: Maximum learning rate to test (default 1e-2, avoids explosion)
-            num_iter: Number of iterations
-            smooth_factor: Smoothing factor for loss curve (exponential moving average)
-            plot: Whether to plot the results
-
-        Returns:
-            Suggested learning rate (LR at minimum smoothed loss / 3)
-        """
-        print("=" * 60)
-        print("Learning Rate Finder (diagnostic only - no weight updates)")
-        print("=" * 60)
-
-        # Save exact initial state for restoration
-        # Deep copy all tensors to ensure we can restore exactly
-        initial_model_state = {k: v.clone() for k, v in self.model.state_dict().items()}
-        initial_optimizer_state = self.optimizer.state_dict()
-        initial_lr = self.lr
-
-        # Setup - NO AMP for deterministic results
-        self.model.train()
-        lr_mult = (end_lr / start_lr) ** (1 / num_iter)
-        lr = start_lr
-
-        lrs = []
-        losses = []
-        smoothed_loss = 0
-        best_loss = float("inf")
-        best_lr = start_lr
-
-        # Create iterator
-        data_iter = iter(self.train_loader)
-
-        pbar = tqdm(range(num_iter), desc="Finding LR")
-        for iteration in pbar:
-            # Get batch (cycle if needed)
-            try:
-                images, targets = next(data_iter)
-            except StopIteration:
-                data_iter = iter(self.train_loader)
-                images, targets = next(data_iter)
-
-            images = [img.to(self.device) for img in images]
-            targets = [
-                {
-                    k: v.to(self.device) if isinstance(v, torch.Tensor) else v
-                    for k, v in t.items()
-                }
-                for t in targets
-            ]
-
-            # Skip empty batches
-            if all(len(t["boxes"]) == 0 for t in targets):
-                continue
-
-            # Zero gradients before forward pass
-            self.optimizer.zero_grad()
-
-            try:
-                # Forward pass - NO AMP for consistent, deterministic results
-                loss_dict = self.model(images, targets)
-                loss = sum(loss_dict.values())
-
-                # Check for invalid loss
-                if not torch.isfinite(loss):
-                    print(f"\nNaN/Inf loss at lr={lr:.2e}, stopping")
-                    break
-
-                # Backward pass ONLY - to measure gradient response
-                # NO optimizer.step() - we don't want to update weights
-                loss.backward()
-
-                loss_val = loss.item()
-
-                # Exponential moving average smoothing
-                if iteration == 0:
-                    smoothed_loss = loss_val
-                else:
-                    smoothed_loss = (
-                        smooth_factor * loss_val + (1 - smooth_factor) * smoothed_loss
-                    )
-
-                # Track best loss and corresponding LR
-                if smoothed_loss < best_loss:
-                    best_loss = smoothed_loss
-                    best_lr = lr
-
-                # Early stopping if loss diverges (4x best loss)
-                if smoothed_loss > 4 * best_loss and iteration > 10:
-                    print(f"\nStopping early - loss exploding at lr={lr:.2e}")
-                    break
-
-                lrs.append(lr)
-                losses.append(smoothed_loss)
-
-                pbar.set_postfix(
-                    lr=f"{lr:.2e}", loss=f"{smoothed_loss:.4f}", best=f"{best_loss:.4f}"
-                )
-
-            except RuntimeError as e:
-                print(f"\nError at lr={lr:.2e}: {e}")
-                break
-
-            # Increase LR for next iteration (exponential schedule)
-            lr *= lr_mult
-
-            # Clean up tensors
-            del images, targets, loss, loss_dict
-
-        # Restore EXACT initial state - model never actually changed due to no optimizer.step()
-        # but we restore anyway for safety and to reset any gradient accumulation
-        self.model.load_state_dict(initial_model_state)
-        self.optimizer.load_state_dict(initial_optimizer_state)
-        self.lr = initial_lr
-        for param_group in self.optimizer.param_groups:
-            param_group["lr"] = initial_lr
-
-        # Determine suggested LR
-        if len(losses) < 10:
-            print("Not enough data points collected. Using default LR.")
-            return self.lr
-
-        # Suggested LR = LR at minimum smoothed loss / 3
-        # Dividing by 3 provides a safety margin for stable training
-        suggested_lr = best_lr / 3
-
-        print(f"\n{'=' * 60}")
-        print(f"Best smoothed loss: {best_loss:.4f} at LR: {best_lr:.2e}")
-        print(f"Suggested Learning Rate: {suggested_lr:.6f} (best_lr / 3)")
-        print(f"{'=' * 60}")
-
-        if plot:
-            try:
-                import matplotlib.pyplot as plt
-
-                fig, ax = plt.subplots(figsize=(10, 6))
-                ax.plot(lrs, losses, "b-", linewidth=2, label="Smoothed Loss")
-                ax.axvline(
-                    x=best_lr,
-                    color="orange",
-                    linestyle=":",
-                    label=f"Min loss LR: {best_lr:.2e}",
-                )
-                ax.axvline(
-                    x=suggested_lr,
-                    color="r",
-                    linestyle="--",
-                    label=f"Suggested LR: {suggested_lr:.2e}",
-                )
-                ax.set_xscale("log")
-                ax.set_xlabel("Learning Rate (log scale)")
-                ax.set_ylabel("Loss (smoothed)")
-                ax.set_title("Learning Rate Finder")
-                ax.legend()
-                ax.grid(True, alpha=0.3)
-                plt.tight_layout()
-                plt.show()
-            except ImportError:
-                print("Matplotlib not available for plotting")
-
-        gc.collect()
-        torch.cuda.empty_cache()
-
-        return suggested_lr
-
-    def set_lr(self, lr: float):
-        """Set learning rate for optimizer."""
-        self.lr = lr
-        for param_group in self.optimizer.param_groups:
-            param_group["lr"] = lr
-        print(f"Learning rate set to: {lr:.6f}")
 
     def get_lr(self) -> float:
         """Get current learning rate."""
@@ -1049,9 +805,7 @@ class Trainer:
                     loss_accumulator.setdefault(k, 0.0)
                     loss_accumulator[k] += v.item()
 
-                # =========================================================
                 # W&B LOGGING: Training step metrics
-                # =========================================================
                 if self.wandb_logger is not None:
                     current_lr = self.get_lr()
 
@@ -1180,7 +934,6 @@ class Trainer:
         self,
         epochs=20,
         save_dir="checkpoints",
-        find_lr_first=False,
         compute_metrics_every: int = 1,
         max_map_samples: int = None,
         # Early stopping based on mAP gap
@@ -1193,7 +946,6 @@ class Trainer:
         Args:
             epochs: Number of epochs to train
             save_dir: Directory to save checkpoints
-            find_lr_first: If True, run LR finder before training
             compute_metrics_every: Compute mAP metrics every N epochs (default=1)
             max_map_samples: Max samples for mAP computation (None=all, use smaller for speed)
             early_stop_gap_patience: Stop training if the train-val mAP gap doesn't improve
@@ -1227,11 +979,6 @@ class Trainer:
             # Learning rate tracking
             "train/lr": [],
         }
-
-        # Optionally find best LR before training
-        if find_lr_first:
-            suggested_lr = self.find_lr()
-            self.set_lr(suggested_lr)
 
         # Create scheduler
         self._create_scheduler()
@@ -1312,9 +1059,7 @@ class Trainer:
             history["train_val/mAP_gap"].append(map_gap)
             history["train/lr"].append(self.get_lr())
 
-            # =========================================================
             # W&B LOGGING: Epoch-level validation metrics
-            # =========================================================
             if self.wandb_logger is not None:
                 # Log validation loss and metrics
                 val_metrics = {
@@ -1389,12 +1134,7 @@ class Trainer:
                 self.save_checkpoint(best_train_map_path, epoch, val_loss)
                 print(f"-> New best train mAP@0.5: {best_train_map:.4f}")
 
-            # =========================================================
             # EARLY STOPPING: Based on train-val mAP gap (DISABLED BY DEFAULT)
-            # =========================================================
-            # The absolute gap should ideally decrease (train and val closer together).
-            # Gap can be positive (train > val = overfitting) or negative (val > train).
-            # We want |gap| to decrease, meaning better alignment between train and val.
             if (
                 early_stop_gap_patience is not None
                 and epoch % compute_metrics_every == 0

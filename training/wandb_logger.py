@@ -160,9 +160,7 @@ class WandbLogger:
         """Check if we should log at this step."""
         return step % self.config.log_freq == 0
 
-    # =========================================================================
     # Training Loop Logging (Scalars)
-    # =========================================================================
 
     def log_training_step(
         self,
@@ -245,9 +243,7 @@ class WandbLogger:
 
         wandb.log(metrics, step=self._step)
 
-    # =========================================================================
     # Gradient Norm Logging
-    # =========================================================================
 
     def log_gradient_norms(self, model: nn.Module, step: Optional[int] = None):
         """
@@ -272,10 +268,7 @@ class WandbLogger:
 
         wandb.log(grad_norms, step=self._step)
 
-    # =========================================================================
     # Validation Visualization
-    # =========================================================================
-
     def set_validation_images(self, indices: List[int]):
         """
         Set fixed validation image indices for consistent visualization.
@@ -322,9 +315,7 @@ class WandbLogger:
             "val/epoch": self._epoch,
         }, step=self._step)
 
-    # =========================================================================
     # Model Checkpointing
-    # =========================================================================
 
     def log_model_checkpoint(
         self,
@@ -410,9 +401,7 @@ class WandbLogger:
             aliases=["best-train-map"],
         )
 
-    # =========================================================================
     # Utilities
-    # =========================================================================
 
     def finish(self):
         """Finish the W&B run."""
@@ -428,9 +417,7 @@ class WandbLogger:
         return False
 
 
-# =============================================================================
 # Helper Functions
-# =============================================================================
 
 def compute_gradient_norms(model: nn.Module) -> Dict[str, float]:
     """
@@ -597,9 +584,7 @@ def create_wandb_image(
     img_np = denormalize_image(image)
     height, width = img_np.shape[:2]
 
-    # =========================================================================
     # Format GROUND TRUTH boxes with instance masks
-    # =========================================================================
     gt_boxes_data = []
     gt_boxes = target.get("boxes", torch.tensor([]))
     gt_labels = target.get("labels", torch.tensor([]))
@@ -645,9 +630,7 @@ def create_wandb_image(
 
             gt_boxes_data.append(box_item)
 
-    # =========================================================================
     # Format PREDICTION boxes with instance masks
-    # =========================================================================
     pred_boxes_data = []
     pred_scores = prediction.get("scores", torch.tensor([]))
 
@@ -702,9 +685,7 @@ def create_wandb_image(
 
             pred_boxes_data.append(box_item)
 
-    # =========================================================================
     # Create W&B Image with boxes (instance masks bound to boxes)
-    # =========================================================================
     boxes_dict = {}
 
     if gt_boxes_data:
@@ -752,9 +733,7 @@ def get_fixed_val_batch(
     return images, targets
 
 
-# =============================================================================
 # Integration with Trainer
-# =============================================================================
 
 def create_wandb_logger(
     hyperparameters: Dict[str, Any],

@@ -14,7 +14,6 @@ import albumentations as A
 from albumentations.pytorch import ToTensorV2
 import numpy as np
 from PIL import Image
-import torch
 import random
 
 
@@ -98,7 +97,6 @@ class TrainAugmentation:
                 masks = np.flip(masks, axis=2).copy()
 
         # 2. Color Jitter (brightness and contrast only)
-        # These don't affect annotations, only the image pixels
         image = self._apply_color_jitter(image)
 
         return image, boxes, masks

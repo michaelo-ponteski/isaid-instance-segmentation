@@ -7,7 +7,7 @@ from PIL import Image, ImageDraw
 import copy
 
 
-def overfit_single_image_test(
+def overfit_test(
     model, dataset, idx=0, num_epochs=100, device="cuda", num_images=3
 ):
     """
