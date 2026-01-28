@@ -17,7 +17,6 @@ import torch.nn.functional as F
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
-from matplotlib.colors import LinearSegmentedColormap
 from PIL import Image
 from typing import Dict, List, Tuple, Optional, Any, Union
 from dataclasses import dataclass, field
@@ -29,12 +28,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from models.maskrcnn_model import CustomMaskRCNN, get_custom_maskrcnn
-from models.backbone import CustomEfficientNetBackbone, AttentionFPN, CBAM
 
-
-# =============================================================================
-# Configuration
-# =============================================================================
 
 ISAID_CLASS_LABELS = {
     0: "background", 1: "ship", 2: "storage_tank", 3: "baseball_diamond",
@@ -70,10 +64,6 @@ class GradCAMConfig:
     save_individual: bool = True
     output_dir: str = "./gradcam_outputs"
 
-
-# =============================================================================
-# Hook-based Feature Extraction
-# =============================================================================
 
 class FeatureExtractor:
     """
@@ -194,10 +184,6 @@ class FeatureExtractor:
         self.clear_hooks()
 
 
-# =============================================================================
-# Grad-CAM Implementation
-# =============================================================================
-
 class GradCAM:
     """
     Grad-CAM implementation for object detection models.
@@ -266,7 +252,6 @@ class GradCAM:
         """
         cam = self.compute_gradcam(features, gradients, target_size)
 
-        # For guided backprop, we'd need to modify the backward pass
         # Here we approximate by using positive gradients only
         if gradients.dim() == 4:
             gradients = gradients[0]
@@ -288,10 +273,6 @@ class GradCAM:
 
         return guided_cam
 
-
-# =============================================================================
-# Visualization Functions
-# =============================================================================
 
 def denormalize_image(
     image: torch.Tensor,
@@ -776,10 +757,6 @@ def visualize_final_predictions(
 
     return fig
 
-
-# =============================================================================
-# Main Pipeline Class
-# =============================================================================
 
 class MaskRCNNVisualizationPipeline:
     """
@@ -1318,10 +1295,6 @@ class MaskRCNNVisualizationPipeline:
         return fig
 
 
-# =============================================================================
-# Utility Functions
-# =============================================================================
-
 def load_pipeline(
     checkpoint_path: str,
     num_classes: int = 16,
@@ -1352,23 +1325,3 @@ def load_pipeline(
     pipeline.load_model_weights(checkpoint_path)
 
     return pipeline
-
-
-if __name__ == "__main__":
-    print("Grad-CAM Visualization Pipeline for Custom Mask R-CNN")
-    print("=" * 60)
-    print("\nUsage:")
-    print("  from visualization.gradcam_pipeline import load_pipeline")
-    print("  ")
-    print("  pipeline = load_pipeline('checkpoint.pth', num_classes=16)")
-    print("  figures = pipeline.generate_all_visualizations('image.jpg')")
-    print("\nThis will generate visualizations for:")
-    print("  1. Backbone feature maps")
-    print("  2. CBAM attention outputs")
-    print("  3. FPN multi-scale features")
-    print("  4. RPN proposals")
-    print("  5. RoI Align sampling grids")
-    print("  6. Box head analysis")
-    print("  7. Mask head stages")
-    print("  8. Grad-CAM heatmaps")
-    print("  9. Final predictions with overlays")

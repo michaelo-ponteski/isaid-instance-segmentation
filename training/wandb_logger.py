@@ -798,36 +798,3 @@ EXAMPLE_HYPERPARAMETERS = {
     "scheduler_type": "onecycle",
     "max_lr": 0.01,
 }
-
-
-if __name__ == "__main__":
-    # Test the logger
-    print("Testing WandbLogger...")
-
-    # Create mock hyperparameters
-    hyperparams = EXAMPLE_HYPERPARAMETERS.copy()
-
-    # Test without actual wandb (dry run)
-    print(f"\nClass labels: {ISAID_CLASS_LABELS}")
-    print(f"\nExample hyperparameters: {hyperparams}")
-
-    # Test gradient norm computation on a simple model
-    class MockModel(nn.Module):
-        def __init__(self):
-            super().__init__()
-            self.backbone = nn.Linear(10, 10)
-            self.cbam = nn.Linear(10, 10)
-            self.roi_heads = nn.Linear(10, 10)
-
-        def forward(self, x):
-            return self.roi_heads(self.cbam(self.backbone(x)))
-
-    model = MockModel()
-    x = torch.randn(1, 10)
-    y = model(x)
-    y.sum().backward()
-
-    grads = compute_gradient_norms(model)
-    print(f"\nGradient norms: {grads}")
-
-    print("\nWandbLogger module loaded successfully!")
