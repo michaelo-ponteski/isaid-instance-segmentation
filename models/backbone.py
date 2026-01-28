@@ -9,7 +9,7 @@ from torchvision.models import efficientnet_b0, EfficientNet_B0_Weights
 
 
 class ChannelAttention(nn.Module):
-    """Channel Attention Module - own layer"""
+    """Channel Attention Module"""
 
     def __init__(self, in_channels, reduction=16):
         super().__init__()
@@ -31,7 +31,7 @@ class ChannelAttention(nn.Module):
 
 
 class SpatialAttention(nn.Module):
-    """Spatial Attention Module - own layer"""
+    """Spatial Attention Module"""
 
     def __init__(self, kernel_size=7):
         super().__init__()
@@ -47,7 +47,7 @@ class SpatialAttention(nn.Module):
 
 
 class CBAM(nn.Module):
-    """Convolutional Block Attention Module - own layer"""
+    """Convolutional Block Attention Module"""
 
     def __init__(self, in_channels, reduction=16, kernel_size=7):
         super().__init__()
@@ -81,7 +81,7 @@ class CustomEfficientNetBackbone(nn.Module):
 
         self.out_channels = {"C2": 40, "C3": 80, "C4": 112, "C5": 320}
 
-        # Add attention modules to each stage (własne warstwy)
+        # Add attention modules to each stage
         self.attention_c2 = CBAM(40)
         self.attention_c3 = CBAM(80)
         self.attention_c4 = CBAM(112)

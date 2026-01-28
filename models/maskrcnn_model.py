@@ -1,6 +1,6 @@
 """
 Custom Mask R-CNN model with modified architecture.
->50% custom layers + attention
+custom layers + attention
 """
 
 import torch
@@ -25,7 +25,7 @@ from models.roi_heads import (
 class CustomMaskRCNN(nn.Module):
     """
     Custom Mask R-CNN with:
-    - EfficientNet backbone with CBAM attention (default) or custom backbone
+    - EfficientNet backbone with CBAM attention
     - Custom FPN with attention modules
     - Enhanced RoI heads with additional layers
 
@@ -55,7 +55,7 @@ class CustomMaskRCNN(nn.Module):
 
         self.num_classes = num_classes
 
-        # Backbone with FPN - use provided or build default
+        # Backbone with FPN
         if backbone_with_fpn is not None:
             self.backbone = backbone_with_fpn
             fpn_out_channels = backbone_with_fpn.out_channels
@@ -254,73 +254,4 @@ def get_custom_maskrcnn(
     )
 
 
-def get_custom_maskrcnn_with_optimized_anchors(
-    num_classes,
-    data_root,
-    pretrained_backbone=True,
-    n_trials=20,
-    device="cuda",
-    image_size=800,
-    use_cached=True,
-    cache_path="optimized_anchors.pt",
-):
-    """
-    Factory function to create Mask R-CNN with Optuna-optimized anchors.
-    
-    Args:
-        num_classes: Number of classes including background
-        data_root: Dataset root directory for anchor analysis
-        pretrained_backbone: Whether to use pretrained backbone
-        n_trials: Number of Optuna optimization trials
-        device: Device for optimization
-        image_size: Image size for dataset
-        use_cached: Whether to use cached optimization results
-        cache_path: Path to cache file
-        
-    Returns:
-        CustomMaskRCNN model with optimized anchors
-    """
-    import os
-    
-    anchor_config = None
-    
-    # Try to load cached results
-    if use_cached and os.path.exists(cache_path):
-        try:
-            cached = torch.load(cache_path)
-            from training.anchor_optimizer import AnchorConfig
-            anchor_config = AnchorConfig(
-                sizes=cached['sizes'],
-                aspect_ratios=cached['aspect_ratios']
-            )
-            print(f"Loaded cached anchor config from {cache_path}")
-            print(f"  Sizes: {anchor_config.sizes}")
-            print(f"  Ratios: {anchor_config.aspect_ratios}")
-        except Exception as e:
-            print(f"Failed to load cached anchors: {e}")
-    
-    # Run optimization if no cached config
-    if anchor_config is None:
-        from training.anchor_optimizer import optimize_anchors_for_dataset
-        
-        anchor_config = optimize_anchors_for_dataset(
-            data_root=data_root,
-            num_classes=num_classes,
-            n_trials=n_trials,
-            device=device,
-            image_size=image_size,
-        )
-        
-        # Cache results
-        if use_cached:
-            torch.save({
-                'sizes': anchor_config.sizes,
-                'aspect_ratios': anchor_config.aspect_ratios,
-            }, cache_path)
-            print(f"Saved optimized anchors to {cache_path}")
-    
-    return get_custom_maskrcnn(
-        num_classes=num_classes,
-        pretrained_backbone=pretrained_backbone,
-        anchor_config=anchor_config,
-    )
+

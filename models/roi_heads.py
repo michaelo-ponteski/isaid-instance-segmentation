@@ -16,7 +16,7 @@ class CustomMaskHead(nn.Module):
     def __init__(self, in_channels, hidden_dim, num_classes):
         super().__init__()
 
-        # Increased number of convolutional layers (own layers)
+        # Increased number of convolutional layers
         self.conv1 = nn.Conv2d(in_channels, hidden_dim, 3, padding=1)
         self.bn1 = nn.BatchNorm2d(hidden_dim)
 
@@ -29,7 +29,7 @@ class CustomMaskHead(nn.Module):
         self.conv4 = nn.Conv2d(hidden_dim, hidden_dim, 3, padding=1)
         self.bn4 = nn.BatchNorm2d(hidden_dim)
 
-        # Additional residual connection (własna warstwa)
+        # Additional residual connection
         self.residual = nn.Conv2d(in_channels, hidden_dim, 1)
 
         # Deconvolution for upsampling
@@ -77,7 +77,7 @@ class CustomBoxFeatureExtractor(nn.Module):
     def __init__(self, in_channels, representation_size):
         super().__init__()
 
-        # Additional FC layers (własne warstwy)
+        # Additional FC layers
         self.fc1 = nn.Linear(in_channels, representation_size)
         self.fc2 = nn.Linear(representation_size, representation_size)
 
@@ -141,13 +141,13 @@ class CustomBoxPredictor(nn.Module):
 class CustomBoxHead(nn.Module):
     """
     Custom box prediction head with additional FC layers.
-    Więcej warstw niż standardowy FastRCNNPredictor
+    More layers than the standard FastRCNNPredictor
     """
 
     def __init__(self, in_channels, representation_size, num_classes):
         super().__init__()
 
-        # Additional FC layers (własne warstwy)
+        # Additional FC layers
         self.fc1 = nn.Linear(in_channels, representation_size)
         self.fc2 = nn.Linear(representation_size, representation_size)
         self.fc3 = nn.Linear(representation_size, representation_size // 2)
@@ -192,8 +192,6 @@ def build_custom_roi_heads(
 ):
     """
     Helper to organize RoI heads.
-    Note: Full RoI heads integration requires modifying torchvision's RoIHeads class
-    or using the complete custom implementation below.
     """
     return {
         "box_roi_pool": box_roi_pool,
